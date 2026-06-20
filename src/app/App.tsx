@@ -1326,6 +1326,9 @@ function AiChatbot({ appContext }: { appContext?: TransitAssistantContext }) {
     appContext?.routeId,
     appContext?.direction,
     appContext?.destinationId,
+    appContext?.originLabel,
+    appContext?.originPos?.[0],
+    appContext?.originPos?.[1],
   ]);
 
   async function sendMessage() {
@@ -1730,14 +1733,18 @@ export default function App() {
     setQuery("");
   };
 
+  const originContext: TransitAssistantContext = {
+    originPos: effectiveOriginPos,
+    originLabel: effectiveOriginLabel,
+  };
   const chatbotContext: TransitAssistantContext =
     screen.id === "map"
-      ? { stopId: screen.stopId }
+      ? { ...originContext, stopId: screen.stopId }
       : screen.id === "busReport"
-        ? { stopId: screen.stopId, routeId: screen.route, direction: screen.dir }
+        ? { ...originContext, stopId: screen.stopId, routeId: screen.route, direction: screen.dir }
         : screen.id === "destNav" || screen.id === "navigation"
-          ? { destinationId: screen.destId }
-          : {};
+          ? { ...originContext, destinationId: screen.destId }
+          : originContext;
 
   return (
     <>
