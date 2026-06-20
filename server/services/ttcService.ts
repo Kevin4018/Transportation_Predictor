@@ -631,8 +631,10 @@ export const searchDestinations = (query: string): DestinationResult[] => {
 
 export const getNearbyStops = (_lat: number, _lng: number): NearbyStop[] =>
   getGtfsDb()
-    ? (getGtfsDb()!
-        .prepare(`
+    ? (() => {
+      const searchRadius = 0.08;
+      return (getGtfsDb()!
+          .prepare(`
           SELECT
             MIN(CAST(stops.stop_id AS INTEGER)) AS stop_id,
             stops.stop_name,
@@ -644,8 +646,15 @@ export const getNearbyStops = (_lat: number, _lng: number): NearbyStop[] =>
             AND stops.stop_lon BETWEEN ? AND ?
             AND stop_routes.service_period = ?
           GROUP BY stops.stop_name
+          LIMIT 300
         `)
-        .all(_lat - 0.03, _lat + 0.03, _lng - 0.03, _lng + 0.03, servicePeriodParam()) as GtfsStop[])
+          .all(
+            _lat - searchRadius,
+            _lat + searchRadius,
+            _lng - searchRadius,
+            _lng + searchRadius,
+            servicePeriodParam(),
+          ) as GtfsStop[])
         .map((stop) => ({
           source: "gtfs" as const,
           stopId: `${GROUP_PREFIX}${stop.stop_id}`,
@@ -661,7 +670,8 @@ export const getNearbyStops = (_lat: number, _lng: number): NearbyStop[] =>
         .filter((stop) => Number.isFinite(stop.pos[0]) && Number.isFinite(stop.pos[1]))
         .sort((a, b) => a.distanceKm - b.distanceKm)
         .slice(0, 60)
-        .map(({ distanceKm: _distanceKm, ...stop }) => stop)
+        .map(({ distanceKm: _distanceKm, ...stop }) => stop);
+    })()
     : Object.entries(STOPS_DB).map(([stopId, stop]) => ({
         source: "mock",
         stopId,

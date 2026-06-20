@@ -13,11 +13,12 @@ interface LeafletMapProps {
   locationStatus?: LocationStatus;
   stops?: NearbyStop[];
   onSelectStop?: (id: string) => void;
+  onMoveEnd?: (center: [number, number]) => void;
   className?: string;
 }
 
 /** Pure-DOM Leaflet map — no react-leaflet context, works with any React version */
-function LeafletMap({ center, zoom, userPos, locationStatus, stops, onSelectStop, className }: LeafletMapProps) {
+function LeafletMap({ center, zoom, userPos, locationStatus, stops, onSelectStop, onMoveEnd, className }: LeafletMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
   const userMarkerRef = useRef<L.Marker | null>(null);
@@ -36,6 +37,11 @@ function LeafletMap({ center, zoom, userPos, locationStatus, stops, onSelectStop
     mapRef.current = map;
 
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
+
+    map.on("moveend", () => {
+      const nextCenter = map.getCenter();
+      onMoveEnd?.([nextCenter.lat, nextCenter.lng]);
+    });
 
     // Stop markers render in a separate effect so async nearby stops can update.
     if (false && stops) {
@@ -496,6 +502,9 @@ function MapScreen({ stopId, showControls, mapCenter, userPos, locationStatus, o
             locationStatus={locationStatus}
             stops={nearbyStops}
             onSelectStop={onSelectStop}
+            onMoveEnd={center => {
+              getNearbyStops(center[0], center[1]).then(setNearbyStops);
+            }}
           />
         </div>
       </div>
@@ -1102,17 +1111,19 @@ function AiChatbot() {
 // ─── App root ─────────────────────────────────────────────────────────────────
 
 type AppScreen =
+  | { id: "loading" }
   | { id: "map"; stopId: string; fromSearch: boolean }
   | { id: "busReport"; stopId: string; route: number; dir: string }
   | { id: "destNav"; destId: string }
   | { id: "navigation"; destId: string };
 
 export default function App() {
-  const [screen, setScreen] = useState<AppScreen>({ id: "map", stopId: "college-yonge", fromSearch: false });
+  const [screen, setScreen] = useState<AppScreen>({ id: "loading" });
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState("");
   const [userPos, setUserPos] = useState<[number, number] | null>(null);
   const [locationStatus, setLocationStatus] = useState<LocationStatus>("locating");
+  const [homeStopId, setHomeStopId] = useState("college-yonge");
 
   useEffect(() => {
     if (!navigator.geolocation) {
@@ -1143,6 +1154,28 @@ export default function App() {
   }, []);
 
   const mapCenter: [number, number] = userPos ?? TORONTO;
+
+  useEffect(() => {
+    if (screen.id !== "loading") return;
+    if (locationStatus === "locating" && !userPos) return;
+
+    let cancelled = false;
+
+    getNearbyStops(mapCenter[0], mapCenter[1])
+      .then(stops => {
+        if (cancelled) return;
+        const nearestStopId = stops[0]?.stopId ?? "college-yonge";
+        setHomeStopId(nearestStopId);
+        setScreen({ id: "map", stopId: nearestStopId, fromSearch: false });
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setScreen({ id: "map", stopId: "college-yonge", fromSearch: false });
+        }
+      });
+
+    return () => { cancelled = true; };
+  }, [locationStatus, mapCenter[0], mapCenter[1], screen.id, userPos]);
 
   const handleSelectStop = (stopId: string) => {
     setSearching(false);
@@ -1181,7 +1214,7 @@ export default function App() {
   };
 
   const handleBackFromDest = () => {
-    setScreen({ id: "map", stopId: "college-yonge", fromSearch: false });
+    setScreen({ id: "map", stopId: homeStopId, fromSearch: false });
   };
 
   const handleSwitchToDestSearch = () => {
@@ -1207,6 +1240,13 @@ export default function App() {
             onSelectStop={handleSelectStop}
             onSelectDest={handleSelectDest}
           />
+        ) : screen.id === "loading" ? (
+          <div className="min-h-screen bg-white flex items-center justify-center">
+            <div className="flex flex-col items-center gap-3">
+              <Skeleton className="size-[56px] rounded-[18px]" />
+              <Skeleton className="h-4 w-40" />
+            </div>
+          </div>
         ) : screen.id === "map" ? (
           <MapScreen
             stopId={screen.stopId}
@@ -1216,7 +1256,7 @@ export default function App() {
             locationStatus={locationStatus}
             onSearch={() => setSearching(true)}
             onOpenReport={handleOpenReport}
-            onBack={() => setScreen({ id: "map", stopId: "college-yonge", fromSearch: false })}
+            onBack={() => setScreen({ id: "map", stopId: homeStopId, fromSearch: false })}
             onSwitchToDest={handleSwitchToDestSearch}
             onSelectStop={stopId => setScreen({ id: "map", stopId, fromSearch: true })}
           />
