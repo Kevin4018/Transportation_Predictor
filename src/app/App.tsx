@@ -14,17 +14,27 @@ interface LeafletMapProps {
   userPos: [number, number] | null;
   locationStatus?: LocationStatus;
   stops?: NearbyStop[];
+  routeLine?: [number, number][];
+  destinationPos?: [number, number];
+  transitMarkers?: Array<{
+    pos: [number, number];
+    mode: "BUS" | "STREETCAR" | "SUBWAY" | "TRANSIT";
+    label: string;
+  }>;
   onSelectStop?: (id: string) => void;
   onMoveEnd?: (center: [number, number]) => void;
   className?: string;
 }
 
 /** Pure-DOM Leaflet map — no react-leaflet context, works with any React version */
-function LeafletMap({ center, zoom, userPos, locationStatus, stops, onSelectStop, onMoveEnd, className }: LeafletMapProps) {
+function LeafletMap({ center, zoom, userPos, locationStatus, stops, routeLine, destinationPos, transitMarkers, onSelectStop, onMoveEnd, className }: LeafletMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
   const userMarkerRef = useRef<L.Marker | null>(null);
   const stopMarkersRef = useRef<L.Marker[]>([]);
+  const routeLineRef = useRef<L.Polyline | null>(null);
+  const destinationMarkerRef = useRef<L.Marker | null>(null);
+  const transitMarkersRef = useRef<L.Marker[]>([]);
 
   // Boot the map once
   useEffect(() => {
@@ -114,6 +124,83 @@ function LeafletMap({ center, zoom, userPos, locationStatus, stops, onSelectStop
     };
   }, [stops, onSelectStop]);
 
+  // Navigation route line
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    routeLineRef.current?.remove();
+    routeLineRef.current = null;
+
+    if (routeLine && routeLine.length > 1) {
+      routeLineRef.current = L.polyline(routeLine, {
+        color: "#007AFF",
+        weight: 5,
+        opacity: 0.9,
+      }).addTo(map);
+    }
+
+    return () => {
+      routeLineRef.current?.remove();
+      routeLineRef.current = null;
+    };
+  }, [routeLine]);
+
+  // Destination marker
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    destinationMarkerRef.current?.remove();
+    destinationMarkerRef.current = null;
+
+    if (destinationPos) {
+      const icon = L.divIcon({
+        className: "",
+        html: `<div style="width:34px;height:34px;display:flex;align-items:center;justify-content:center;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.35))"><svg width="30" height="34" viewBox="0 0 18 21" aria-hidden="true"><path d="${P.pinFill}" fill="#E53935"/><circle cx="8.7" cy="7.2" r="3.1" fill="white"/></svg></div>`,
+        iconSize: [34, 34],
+        iconAnchor: [17, 31],
+      });
+      destinationMarkerRef.current = L.marker(destinationPos, { icon }).addTo(map);
+      destinationMarkerRef.current.bindTooltip("Destination", { permanent: false, direction: "top", offset: [0, -28] });
+    }
+
+    return () => {
+      destinationMarkerRef.current?.remove();
+      destinationMarkerRef.current = null;
+    };
+  }, [destinationPos]);
+
+  // Route transit stop/station markers
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    transitMarkersRef.current.forEach(marker => marker.remove());
+    transitMarkersRef.current = [];
+
+    (transitMarkers ?? []).forEach(marker => {
+      const isSubway = marker.mode === "SUBWAY";
+      const glyph = isSubway
+        ? `<svg width="18" height="18" viewBox="0 0 20 20" fill="none"><rect x="3" y="2" width="14" height="14" rx="3" stroke="#1D1B20" stroke-width="2"/><path d="M6.5 6.5H13.5M6.5 10H13.5" stroke="#1D1B20" stroke-linecap="round" stroke-width="2"/><circle cx="7" cy="13.5" r="1.1" fill="#1D1B20"/><circle cx="13" cy="13.5" r="1.1" fill="#1D1B20"/></svg>`
+        : `<svg width="18" height="18" viewBox="0 0 20 20" fill="none"><path d="${P.bus}" stroke="#1D1B20" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+      const icon = L.divIcon({
+        className: "",
+        html: `<div style="width:30px;height:30px;border-radius:15px;background:white;border:2px solid #1D1B20;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 5px rgba(0,0,0,0.25)">${glyph}</div>`,
+        iconSize: [30, 30],
+        iconAnchor: [15, 15],
+      });
+      const leafletMarker = L.marker(marker.pos, { icon }).addTo(map);
+      leafletMarker.bindTooltip(marker.label, { permanent: false, direction: "top", offset: [0, -14] });
+      transitMarkersRef.current.push(leafletMarker);
+    });
+
+    return () => {
+      transitMarkersRef.current.forEach(marker => marker.remove());
+      transitMarkersRef.current = [];
+    };
+  }, [transitMarkers]);
+
   const locationLabel =
     locationStatus === "locating" ? "Locating..."
       : locationStatus === "denied" ? "Location permission denied"
@@ -160,7 +247,7 @@ import {
   getStopMeta, searchStops, searchDestinations, getNearbyStops,
   getPrediction, getBusReport as apiBusReport, getNavigationRoute, askTransitAssistant,
   type Prediction, type BusReport as BusReportData, type NavigationRoute,
-  type NearbyStop, type TransitAssistantContext,
+  type NearbyStop, type TransitAssistantContext, type NavigationMode,
 } from "@/api/ttc";
 import {
   getCurrentWeather,
@@ -246,6 +333,16 @@ const BusIcon = ({ fill = "#1D1B20" }: { fill?: string }) => (
   </svg>
 );
 
+const SubwayIcon = ({ fill = "#1D1B20" }: { fill?: string }) => (
+  <svg className="block size-full" fill="none" viewBox="0 0 20 20">
+    <rect x="3" y="2" width="14" height="14" rx="3" stroke={fill} strokeWidth="2" />
+    <path d="M6.5 6.5H13.5M6.5 10H13.5" stroke={fill} strokeLinecap="round" strokeWidth="2" />
+    <circle cx="7" cy="13.5" r="1.1" fill={fill} />
+    <circle cx="13" cy="13.5" r="1.1" fill={fill} />
+    <path d="M7 18H13" stroke={fill} strokeLinecap="round" strokeWidth="2" />
+  </svg>
+);
+
 const CloudIcon = () => (
   <svg className="block size-full" fill="none" viewBox="0 0 24.506 18.5">
     <path d={P.cloud} stroke="#1E1E1E" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" />
@@ -328,35 +425,57 @@ function directionTextClass(label: string) {
 // ─── Screen components ────────────────────────────────────────────────────────
 
 // ── Search overlay ──
+type SearchTarget = "general" | "origin" | "destination";
+type OriginSelection = { label: string; pos: [number, number] };
+
 interface SearchOverlayProps {
   query: string;
+  target: SearchTarget;
+  currentLocation: OriginSelection | null;
   onQueryChange: (q: string) => void;
   onClose: () => void;
   onSelectStop: (id: string) => void;
   onSelectDest: (id: string) => void;
+  onSelectOrigin: (origin: OriginSelection) => void;
+  onSelectCurrentLocation: () => void;
 }
-function SearchOverlay({ query, onQueryChange, onClose, onSelectStop, onSelectDest }: SearchOverlayProps) {
+function SearchOverlay({ query, target, currentLocation, onQueryChange, onClose, onSelectStop, onSelectDest, onSelectOrigin, onSelectCurrentLocation }: SearchOverlayProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => { inputRef.current?.focus(); }, []);
 
-  type Row = { id: string; type: "stop" | "dest"; title: string; subtitle: string; distance: string };
+  type Row = { id: string; type: "stop" | "dest"; title: string; subtitle: string; distance: string; pos?: [number, number] };
   const [results, setResults] = useState<Row[]>([]);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
+    if (query.trim().length < 2) {
+      setResults([]);
+      setLoading(false);
+      return () => { cancelled = true; };
+    }
+
     setLoading(true);
-    Promise.all([searchStops(query), searchDestinations(query)]).then(([stops, dests]) => {
+    const searchPromise = target === "destination"
+      ? Promise.all([Promise.resolve([]), searchDestinations(query)])
+      : Promise.all([searchStops(query), searchDestinations(query)]);
+
+    searchPromise.then(([stops, dests]) => {
       if (cancelled) return;
       const rows: Row[] = [
-        ...stops.map(s => ({ id: s.id, type: "stop" as const, title: s.name, subtitle: s.routes, distance: s.distance })),
-        ...dests.map(d => ({ id: d.id, type: "dest" as const, title: d.name, subtitle: d.address, distance: d.distance })),
+        ...stops.map(s => ({ id: s.id, type: "stop" as const, title: s.name, subtitle: s.routes, distance: s.distance, pos: s.pos })),
+        ...dests.map(d => ({ id: d.id, type: "dest" as const, title: d.name, subtitle: d.address, distance: d.distance, pos: d.pos })),
       ];
       setResults(rows);
       setLoading(false);
+    }).catch(() => {
+      if (!cancelled) {
+        setResults([]);
+        setLoading(false);
+      }
     });
     return () => { cancelled = true; };
-  }, [query]);
+  }, [query, target]);
 
   return (
     <div className="flex flex-col h-full bg-white">
@@ -385,25 +504,47 @@ function SearchOverlay({ query, onQueryChange, onClose, onSelectStop, onSelectDe
           <div className="flex flex-col gap-1 px-4 pt-3">
             {[...Array(5)].map((_, i) => <Skeleton key={i} className="h-[49px] w-full" />)}
           </div>
-        ) : results.map(r => (
-          <button
-            key={r.id}
-            onClick={() => r.type === "stop" ? onSelectStop(r.id) : onSelectDest(r.id)}
-            className="w-full flex items-start gap-3 px-4 py-3 border-b border-[#c7c7c7] bg-white hover:bg-gray-50 text-left"
-          >
-            <div className="size-[24px] shrink-0 mt-0.5">
-              {r.type === "stop" ? <BusIcon /> : <PinIcon />}
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="font-['SF_Compact',system-ui,sans-serif] text-[17px] text-black tracking-[-0.08px] truncate">{r.title}</p>
-              <p className="font-['SF_Compact',system-ui,sans-serif] text-[12px] text-[#858585] tracking-[-0.08px] truncate">{r.subtitle}</p>
-            </div>
-            <div className="flex flex-col items-end shrink-0 gap-1">
-              <div className="size-[18px]"><ArrowUpRightIcon /></div>
-              <span className="font-['SF_Compact',system-ui,sans-serif] text-[12px] text-[#858585]">{r.distance}</span>
-            </div>
-          </button>
-        ))}
+        ) : (
+          <>
+            {target === "origin" && currentLocation && (
+              <button
+                onClick={onSelectCurrentLocation}
+                className="w-full flex items-start gap-3 px-4 py-3 border-b border-[#c7c7c7] bg-white hover:bg-gray-50 text-left"
+              >
+                <div className="size-[24px] shrink-0 mt-0.5"><PinIcon fill="#007AFF" /></div>
+                <div className="flex-1 min-w-0">
+                  <p className="font-['SF_Compact',system-ui,sans-serif] text-[17px] text-[#007AFF] tracking-[-0.08px] truncate">Your location</p>
+                  <p className="font-['SF_Compact',system-ui,sans-serif] text-[12px] text-[#858585] tracking-[-0.08px] truncate">Use current GPS location</p>
+                </div>
+              </button>
+            )}
+            {results.map(r => (
+              <button
+                key={r.id}
+                onClick={() => {
+                  if (target === "origin" && r.pos) {
+                    onSelectOrigin({ label: r.title.replace(/^(bus stop|destination):\s*/i, ""), pos: r.pos });
+                    return;
+                  }
+                  r.type === "stop" ? onSelectStop(r.id) : onSelectDest(r.id);
+                }}
+                className="w-full flex items-start gap-3 px-4 py-3 border-b border-[#c7c7c7] bg-white hover:bg-gray-50 text-left"
+              >
+                <div className="size-[24px] shrink-0 mt-0.5">
+                  {r.type === "stop" ? <BusIcon /> : <PinIcon />}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="font-['SF_Compact',system-ui,sans-serif] text-[17px] text-black tracking-[-0.08px] truncate">{r.title}</p>
+                  <p className="font-['SF_Compact',system-ui,sans-serif] text-[12px] text-[#858585] tracking-[-0.08px] truncate">{r.subtitle}</p>
+                </div>
+                <div className="flex flex-col items-end shrink-0 gap-1">
+                  <div className="size-[18px]"><ArrowUpRightIcon /></div>
+                  <span className="font-['SF_Compact',system-ui,sans-serif] text-[12px] text-[#858585]">{r.distance}</span>
+                </div>
+              </button>
+            ))}
+          </>
+        )}
       </div>
     </div>
   );
@@ -791,32 +932,83 @@ function BusReport({ route, dir, stopId, mapCenter, onClose }: BusReportProps) {
 interface DestNavProps {
   destId: string;
   mapCenter: [number, number];
+  originPos: [number, number] | null;
+  originLabel: string;
   userPos: [number, number] | null;
   locationStatus: LocationStatus;
-  onStartNavigation: () => void;
+  onStartNavigation: (mode: NavigationMode) => void;
   onBack: () => void;
+  onSearchOrigin: () => void;
+  onSearchDest: (initialQuery?: string) => void;
   onSwitchToStop: () => void;
 }
-function DestNavScreen({ destId, mapCenter, userPos, locationStatus, onStartNavigation, onBack, onSwitchToStop }: DestNavProps) {
-  const [route, setRoute] = useState<NavigationRoute | null>(null);
+function DestNavScreen({ destId, mapCenter, originPos, originLabel, userPos, locationStatus, onStartNavigation, onBack, onSearchOrigin, onSearchDest, onSwitchToStop }: DestNavProps) {
+  const [routesByMode, setRoutesByMode] = useState<Partial<Record<NavigationMode, NavigationRoute>>>({});
   const [loading, setLoading] = useState(true);
+  const [mode, setMode] = useState<NavigationMode>("bus");
+  const currentClock = useCurrentClock();
+  const route = routesByMode[mode] ?? routesByMode.bus ?? null;
+  const routeFailed = !loading && !route;
 
   useEffect(() => {
+    if (!originPos) return;
+    let cancelled = false;
     setLoading(true);
-    getNavigationRoute("current-location", destId, userPos)
-      .then(r => { setRoute(r); setLoading(false); })
-      .catch(() => setLoading(false));
-  }, [destId, userPos]);
+    Promise.allSettled(
+      (["bus", "car", "walk", "bike"] as NavigationMode[]).map(async currentMode => {
+        const result = await getNavigationRoute("current-location", destId, originPos, currentMode);
+        return [currentMode, result] as const;
+      })
+    )
+      .then(results => {
+        if (cancelled) return;
+        const entries = results
+          .filter((result): result is PromiseFulfilledResult<readonly [NavigationMode, NavigationRoute]> => result.status === "fulfilled")
+          .map(result => result.value);
+        setRoutesByMode(Object.fromEntries(entries) as Partial<Record<NavigationMode, NavigationRoute>>);
+        setLoading(false);
+      })
+      .catch(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [destId, originPos]);
 
-  type Mode = "bus" | "car" | "walk" | "bike";
-  const [mode, setMode] = useState<Mode>("bus");
-
-  const modeTimes: Record<Mode, string> = { bus: "30 min", car: "20 min", walk: "50 min", bike: "20 min" };
-  const modeIcons: Record<Mode, React.ReactNode> = {
+  const modeTimes = (currentMode: NavigationMode) => {
+    const routeForMode = routesByMode[currentMode];
+    if (!routeForMode) return loading ? "..." : "--";
+    if (routeForMode.available === false) return "--";
+    return `${routeForMode.durationMin ?? routeForMode.etaMin} min`;
+  };
+  const modeIcons: Record<NavigationMode, React.ReactNode> = {
     bus:  <BusIcon  fill={mode === "bus"  ? "#1D1B20" : "#FEF7FF"} />,
     car:  <CarIcon  fill={mode === "car"  ? "#1D1B20" : "#FEF7FF"} />,
     walk: <WalkIcon fill={mode === "walk" ? "#1D1B20" : "#FEF7FF"} />,
     bike: <img src={imgBike} alt="bike" className="size-full object-contain" />,
+  };
+  const routeLine = route?.available === false ? undefined : route?.legs?.flatMap(leg => leg.geometry ?? []);
+  const destinationPos = route?.destinationCoordinates
+    ? [route.destinationCoordinates.lat, route.destinationCoordinates.lng] as [number, number]
+    : undefined;
+  const transitMarkers = route?.available === false ? [] : (route?.legs ?? [])
+    .filter((leg): leg is NonNullable<NavigationRoute["legs"]>[number] & { fromPos: [number, number] } =>
+      (leg.mode === "BUS" || leg.mode === "STREETCAR" || leg.mode === "SUBWAY" || leg.mode === "TRANSIT") && !!leg.fromPos
+    )
+    .map(leg => ({
+      pos: leg.fromPos,
+      mode: leg.mode === "STREETCAR" ? "BUS" as const : leg.mode,
+      label: leg.fromName,
+    }));
+  const renderLegIcon = (legMode: NavigationRoute["legs"] extends Array<infer T> ? T extends { mode: infer M } ? M : never : never) => {
+    if (legMode === "WALK") return <WalkIcon />;
+    if (legMode === "CAR") return <CarIcon />;
+    if (legMode === "BICYCLE") return <img src={imgBike} alt="bike" className="size-full object-contain" />;
+    if (legMode === "SUBWAY") return <SubwayIcon />;
+    return <BusIcon />;
+  };
+  const legLabel = (leg: NonNullable<NavigationRoute["legs"]>[number]) => {
+    if (leg.mode === "WALK") return `Walk ${leg.durationMin} min${leg.distanceMeters ? ` (${leg.distanceMeters} m)` : ""}`;
+    if (leg.mode === "CAR") return `Drive ${leg.durationMin} min`;
+    if (leg.mode === "BICYCLE") return `Bike ${leg.durationMin} min`;
+    return `${leg.routeLabel ?? "Transit"}${leg.headsign ? ` to ${leg.headsign}` : ""}`;
   };
 
   return (
@@ -824,23 +1016,31 @@ function DestNavScreen({ destId, mapCenter, userPos, locationStatus, onStartNavi
       <div className="h-[52px] shrink-0" />
       {/* Two search bars */}
       <div className="px-[19px] shrink-0 flex flex-col gap-2">
-        <div className="bg-[rgba(120,120,128,0.16)] rounded-full h-[44px] flex items-center px-[11px] gap-2">
+        <button
+          type="button"
+          onClick={onSearchOrigin}
+          className="bg-[rgba(120,120,128,0.16)] rounded-full h-[44px] flex items-center px-[11px] gap-2 text-left cursor-pointer"
+        >
           <div className="size-[20px] shrink-0"><PinIcon fill="#007AFF" /></div>
-          <span className="font-['SF_Compact',system-ui,sans-serif] text-[17px] text-[#007AFF] tracking-[-0.08px]">Your location</span>
-        </div>
-        <div className="bg-[rgba(120,120,128,0.16)] rounded-full h-[44px] flex items-center px-[11px] gap-2">
+          <span className="font-['SF_Compact',system-ui,sans-serif] text-[17px] text-[#007AFF] tracking-[-0.08px] truncate">{originLabel}</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => onSearchDest(route?.destName ?? "")}
+          className="bg-[rgba(120,120,128,0.16)] rounded-full h-[44px] flex items-center px-[11px] gap-2 text-left cursor-pointer"
+        >
           <div className="size-[20px] shrink-0"><PinIcon /></div>
-          {loading || !route
+          {loading
             ? <Skeleton className="h-4 w-40" />
-            : <span className="font-['SF_Compact',system-ui,sans-serif] text-[17px] text-[#727272] tracking-[-0.08px]">{route.destName}</span>
+            : <span className="font-['SF_Compact',system-ui,sans-serif] text-[17px] text-[#727272] tracking-[-0.08px]">{route?.destName ?? "Destination unavailable"}</span>
           }
-        </div>
+        </button>
       </div>
 
       {/* Map */}
       <div className="px-[25px] mt-[10px] shrink-0">
         <div className="rounded-[8px] overflow-hidden h-[200px] w-full">
-          <LeafletMap center={mapCenter} zoom={14} userPos={userPos} locationStatus={locationStatus} />
+          <LeafletMap center={mapCenter} zoom={14} userPos={userPos} locationStatus={locationStatus} routeLine={routeLine} destinationPos={destinationPos} transitMarkers={transitMarkers} />
         </div>
       </div>
 
@@ -859,66 +1059,67 @@ function DestNavScreen({ destId, mapCenter, userPos, locationStatus, onStartNavi
         <div className="bg-[#d9d9d9] rounded-[20px] shadow-[0px_4px_4px_0px_rgba(0,0,0,0.25)] w-full overflow-hidden">
           {/* Transit mode tabs */}
           <div className="flex gap-[5px] px-[11px] pt-[11px]">
-            {(["bus", "car", "walk", "bike"] as Mode[]).map(m => (
+            {(["bus", "car", "walk", "bike"] as NavigationMode[]).map(m => (
               <button key={m} onClick={() => setMode(m)}
                 className={`flex-1 h-[50px] rounded-tl-[10px] rounded-tr-[10px] flex flex-col items-center justify-center gap-0.5 cursor-pointer transition-colors ${m === mode ? "bg-white" : "bg-[#aaa]"}`}>
                 <div className="size-[22px]">{modeIcons[m]}</div>
-                <span className={`font-['SF_Compact',system-ui,sans-serif] text-[12px] tracking-[-0.08px] ${m === mode ? "text-black" : "text-white"}`}>{modeTimes[m]}</span>
+                <span className={`font-['SF_Compact',system-ui,sans-serif] text-[12px] tracking-[-0.08px] ${m === mode ? "text-black" : "text-white"}`}>{modeTimes(m)}</span>
               </button>
             ))}
           </div>
 
           {/* Route detail */}
           <div className="mx-[11px] bg-white rounded-bl-[20px] rounded-br-[20px] px-4 py-3">
-            {loading || !route ? (
+            {loading ? (
               <div className="flex flex-col gap-3">
                 {[1,2,3,4].map(i => <Skeleton key={i} className="h-10 w-full" />)}
+              </div>
+            ) : routeFailed ? (
+              <div className="py-8">
+                <p className="font-['SF_Compact',system-ui,sans-serif] text-[15px] text-[#4f4f4f] text-center">
+                  Navigation unavailable.
+                </p>
               </div>
             ) : (
               <>
                 <div className="flex items-center justify-between py-2 border-b border-[#b8b8b8]">
                   <div className="flex items-center gap-2">
                     <div className="size-[20px] shrink-0"><PinIcon fill="#007AFF" /></div>
-                    <span className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-black">Your location</span>
+                    <span className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-black">{originLabel}</span>
                   </div>
-                  <span className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-black">{route.departureTime}</span>
+                  <span className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-black">{currentClock}</span>
                 </div>
-                <div className="flex items-center gap-2 py-1.5">
-                  <div className="flex flex-col items-center gap-1 pl-[2px]">
-                    <div className="w-px h-3 bg-[#CAC4D0]" />
-                    <div className="size-[4px] rounded-full bg-[#CAC4D0]" />
-                    <div className="w-px h-3 bg-[#CAC4D0]" />
+                {route.available === false ? (
+                  <div className="py-8 border-b border-[#b8b8b8]">
+                    <p className="font-['SF_Compact',system-ui,sans-serif] text-[15px] text-[#4f4f4f] text-center">
+                      {route.message ?? "Cannot find route."}
+                    </p>
                   </div>
-                  <span className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-[#5b5b5b] ml-4">
-                    walk {route.walkMin} min ({route.walkMeters} m)
-                  </span>
-                </div>
-                <div className="flex items-start gap-2 py-2 border-b border-[#b8b8b8]">
-                  <div className="size-[20px] shrink-0 mt-0.5"><BusIcon /></div>
-                  <div className="flex-1">
-                    <div className="flex items-baseline justify-between">
-                      <span className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-black font-medium">{route.busStop}</span>
-                      <span className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-[#656565] ml-2">
-                        in <span className="font-['Rowdies',sans-serif] text-[20px] text-[#4f4f4f]">{route.etaMin}</span> min.
-                      </span>
-                    </div>
-                    <span className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-[#6b6b6b]">{route.routeLabel}</span>
-                    <div className="flex items-center gap-1 mt-0.5">
-                      <svg className="size-[14px]" fill="none" viewBox="0 0 9.6 5.6">
-                        <path d={P.chevronDown} stroke="#1E1E1E" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.6" />
-                      </svg>
-                      <span className="font-['SF_Compact',system-ui,sans-serif] text-[12px] text-[#6b6b6b]">
-                        Also in {route.alsoAt.join(" and ")}.
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <svg className="size-[14px]" fill="none" viewBox="0 0 9.6 5.6">
-                        <path d={P.chevronDown} stroke="#1E1E1E" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.6" />
-                      </svg>
-                      <span className="font-['SF_Compact',system-ui,sans-serif] text-[12px] text-[#6b6b6b]">Ride {route.totalStops} stops</span>
-                    </div>
+                ) : (
+                  <div className="border-b border-[#b8b8b8]">
+                    {(route.legs ?? []).map((leg, index) => (
+                      <div key={`${leg.mode}-${index}`} className="flex items-start gap-3 py-2">
+                        <div className="size-[20px] shrink-0 mt-0.5">{renderLegIcon(leg.mode)}</div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-baseline justify-between gap-2">
+                            <span className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-black font-medium truncate">
+                              {leg.fromName}
+                            </span>
+                            <span className="font-['SF_Compact',system-ui,sans-serif] text-[12px] text-[#656565] shrink-0">
+                              {leg.startTime}
+                            </span>
+                          </div>
+                          <p className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-[#5b5b5b] leading-[20px]">
+                            {legLabel(leg)}
+                          </p>
+                          <span className="font-['SF_Compact',system-ui,sans-serif] text-[12px] text-[#6b6b6b]">
+                            to {leg.toName}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                </div>
+                )}
                 <div className="flex items-center justify-between py-2">
                   <div className="flex items-center gap-2">
                     <div className="size-[20px] shrink-0"><PinIcon /></div>
@@ -929,8 +1130,9 @@ function DestNavScreen({ destId, mapCenter, userPos, locationStatus, onStartNavi
               </>
             )}
             <button
-              onClick={onStartNavigation}
-              className="w-full bg-[#9d9d9d] rounded-[10px] h-[39px] flex items-center justify-center mt-2 cursor-pointer"
+              onClick={() => onStartNavigation(mode)}
+              disabled={route?.available === false}
+              className="w-full bg-[#9d9d9d] disabled:bg-[#c9c9c9] rounded-[10px] h-[39px] flex items-center justify-center mt-2 cursor-pointer disabled:cursor-default"
             >
               <span className="font-['SF_Compact',system-ui,sans-serif] text-[16px] text-white tracking-[-0.08px]">Start Navigation</span>
             </button>
@@ -942,19 +1144,56 @@ function DestNavScreen({ destId, mapCenter, userPos, locationStatus, onStartNavi
 }
 
 // ── Navigation screen ──
-interface NavScreenProps { destId: string; mapCenter: [number, number]; userPos: [number, number] | null; locationStatus: LocationStatus; onClose: () => void }
-function NavScreen({ destId, mapCenter, userPos, locationStatus, onClose }: NavScreenProps) {
+interface NavScreenProps {
+  destId: string;
+  mode: NavigationMode;
+  mapCenter: [number, number];
+  originPos: [number, number] | null;
+  originLabel: string;
+  userPos: [number, number] | null;
+  locationStatus: LocationStatus;
+  onClose: () => void;
+}
+function NavScreen({ destId, mode, mapCenter, originPos, originLabel, userPos, locationStatus, onClose }: NavScreenProps) {
   const [route, setRoute] = useState<NavigationRoute | null>(null);
+  const currentClock = useCurrentClock();
+  const routeLine = route?.legs?.flatMap(leg => leg.geometry ?? []);
+  const destinationPos = route?.destinationCoordinates
+    ? [route.destinationCoordinates.lat, route.destinationCoordinates.lng] as [number, number]
+    : undefined;
+  const transitMarkers = route?.available === false ? [] : (route?.legs ?? [])
+    .filter((leg): leg is NonNullable<NavigationRoute["legs"]>[number] & { fromPos: [number, number] } =>
+      (leg.mode === "BUS" || leg.mode === "STREETCAR" || leg.mode === "SUBWAY" || leg.mode === "TRANSIT") && !!leg.fromPos
+    )
+    .map(leg => ({
+      pos: leg.fromPos,
+      mode: leg.mode === "STREETCAR" ? "BUS" as const : leg.mode,
+      label: leg.fromName,
+    }));
+  const renderNavLegIcon = (legMode: NonNullable<NavigationRoute["legs"]>[number]["mode"]) => {
+    if (legMode === "WALK") return <WalkIcon />;
+    if (legMode === "CAR") return <CarIcon />;
+    if (legMode === "BICYCLE") return <img src={imgBike} alt="bike" className="size-full object-contain" />;
+    if (legMode === "SUBWAY") return <SubwayIcon />;
+    return <BusIcon />;
+  };
+  const navLegLabel = (leg: NonNullable<NavigationRoute["legs"]>[number]) => {
+    if (leg.mode === "WALK") return `Walk ${leg.durationMin} min${leg.distanceMeters ? ` (${leg.distanceMeters} m)` : ""}`;
+    if (leg.mode === "CAR") return `Drive ${leg.durationMin} min`;
+    if (leg.mode === "BICYCLE") return `Bike ${leg.durationMin} min`;
+    return `${leg.routeLabel ?? "Transit"}${leg.headsign ? ` to ${leg.headsign}` : ""}`;
+  };
 
   useEffect(() => {
-    getNavigationRoute("current-location", destId, userPos).then(setRoute).catch(() => null);
-  }, [destId, userPos]);
+    if (!originPos) return;
+    getNavigationRoute("current-location", destId, originPos, mode).then(setRoute).catch(() => null);
+  }, [destId, mode, originPos]);
 
   return (
     <div className="bg-white relative h-full min-h-[844px]">
       {/* Full-screen map */}
       <div className="absolute inset-0">
-        <LeafletMap center={mapCenter} zoom={16} userPos={userPos} locationStatus={locationStatus} className="absolute inset-0" />
+        <LeafletMap center={mapCenter} zoom={16} userPos={userPos} locationStatus={locationStatus} routeLine={routeLine} destinationPos={destinationPos} transitMarkers={transitMarkers} className="absolute inset-0" />
       </div>
 
       {/* Close button */}
@@ -972,22 +1211,36 @@ function NavScreen({ destId, mapCenter, userPos, locationStatus, onClose }: NavS
             <div className="flex items-center justify-between py-1.5 border-b border-[#b8b8b8]">
               <div className="flex items-center gap-2">
                 <div className="size-[20px] shrink-0"><PinIcon fill="#007AFF" /></div>
-                <span className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-black">Your location</span>
+                <span className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-black">{originLabel}</span>
               </div>
-              <span className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-black">18:08</span>
+              <span className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-black">{currentClock}</span>
             </div>
-            <div className="flex items-center gap-2 py-1.5">
-              <div className="size-[20px] shrink-0 ml-0.5 opacity-40">
-                <svg className="block size-full" fill="none" viewBox="0 0 3.67 15.33">
-                  <circle cx="1.833" cy="1" r="1" stroke="#1E1E1E" strokeLinecap="round" strokeWidth="2" />
-                  <circle cx="1.833" cy="7.667" r="1" stroke="#1E1E1E" strokeLinecap="round" strokeWidth="2" />
-                  <circle cx="1.833" cy="14.333" r="1" stroke="#1E1E1E" strokeLinecap="round" strokeWidth="2" />
-                </svg>
+            {!route ? (
+              <div className="flex flex-col gap-2 py-2">
+                <Skeleton className="h-8 w-full" />
+                <Skeleton className="h-8 w-4/5" />
               </div>
-              <span className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-[#5b5b5b] ml-3">
-                {route ? `walk ${route.walkMin} min (${route.walkMeters} m)` : "walk 5 min (350 m)"}
-              </span>
-            </div>
+            ) : route.available === false ? (
+              <p className="py-6 font-['SF_Compact',system-ui,sans-serif] text-[15px] text-[#4f4f4f] text-center">
+                {route.message ?? "Cannot find route."}
+              </p>
+            ) : (
+              <div className="max-h-[220px] overflow-y-auto">
+                {(route.legs ?? []).map((leg, index) => (
+                  <div key={`${leg.mode}-${index}`} className="flex items-start gap-3 py-2 border-b border-[#e3e3e3] last:border-b-0">
+                    <div className="size-[20px] shrink-0 mt-0.5">{renderNavLegIcon(leg.mode)}</div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-baseline justify-between gap-2">
+                        <span className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-black font-medium truncate">{leg.fromName}</span>
+                        <span className="font-['SF_Compact',system-ui,sans-serif] text-[12px] text-[#656565] shrink-0">{leg.startTime}</span>
+                      </div>
+                      <p className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-[#5b5b5b] leading-[20px]">{navLegLabel(leg)}</p>
+                      <span className="font-['SF_Compact',system-ui,sans-serif] text-[12px] text-[#6b6b6b]">to {leg.toName}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -1165,7 +1418,7 @@ type AppScreen =
   | { id: "map"; stopId: string; fromSearch: boolean }
   | { id: "busReport"; stopId: string; route: number; dir: string }
   | { id: "destNav"; destId: string }
-  | { id: "navigation"; destId: string };
+  | { id: "navigation"; destId: string; mode: NavigationMode };
 
 function useCanvasScale() {
   const [scale, setScale] = useState(1);
@@ -1189,11 +1442,36 @@ function useCanvasScale() {
   return scale;
 }
 
+function formatTorontoClock(date: Date) {
+  return date.toLocaleTimeString("en-CA", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "America/Toronto",
+  });
+}
+
+function useCurrentClock() {
+  const [clock, setClock] = useState(() => formatTorontoClock(new Date()));
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      setClock(formatTorontoClock(new Date()));
+    }, 10000);
+
+    return () => window.clearInterval(intervalId);
+  }, []);
+
+  return clock;
+}
+
 export default function App() {
   const [screen, setScreen] = useState<AppScreen>({ id: "loading" });
   const [searching, setSearching] = useState(false);
+  const [searchTarget, setSearchTarget] = useState<SearchTarget>("general");
   const [query, setQuery] = useState("");
   const [userPos, setUserPos] = useState<[number, number] | null>(null);
+  const [originOverride, setOriginOverride] = useState<OriginSelection | null>(null);
   const [locationStatus, setLocationStatus] = useState<LocationStatus>("locating");
   const [homeStopId, setHomeStopId] = useState("college-yonge");
   const canvasScale = useCanvasScale();
@@ -1226,7 +1504,9 @@ export default function App() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
-  const mapCenter: [number, number] = userPos ?? TORONTO;
+  const effectiveOriginPos = originOverride?.pos ?? userPos ?? TORONTO;
+  const effectiveOriginLabel = originOverride?.label ?? "Your location";
+  const mapCenter: [number, number] = effectiveOriginPos ?? TORONTO;
 
   useEffect(() => {
     if (screen.id !== "loading") return;
@@ -1252,14 +1532,30 @@ export default function App() {
 
   const handleSelectStop = (stopId: string) => {
     setSearching(false);
+    setSearchTarget("general");
     setQuery("");
     setScreen({ id: "map", stopId, fromSearch: true });
   };
 
   const handleSelectDest = (destId: string) => {
     setSearching(false);
+    setSearchTarget("general");
     setQuery("");
     setScreen({ id: "destNav", destId });
+  };
+
+  const handleSelectOrigin = (origin: OriginSelection) => {
+    setOriginOverride(origin);
+    setSearching(false);
+    setSearchTarget("general");
+    setQuery("");
+  };
+
+  const handleSelectCurrentLocation = () => {
+    setOriginOverride(null);
+    setSearching(false);
+    setSearchTarget("general");
+    setQuery("");
   };
 
   const handleOpenReport = (route: number, dir: string) => {
@@ -1274,9 +1570,9 @@ export default function App() {
     }
   };
 
-  const handleStartNavigation = () => {
+  const handleStartNavigation = (mode: NavigationMode) => {
     if (screen.id === "destNav") {
-      setScreen({ id: "navigation", destId: screen.destId });
+      setScreen({ id: "navigation", destId: screen.destId, mode });
     }
   };
 
@@ -1290,14 +1586,45 @@ export default function App() {
     setScreen({ id: "map", stopId: homeStopId, fromSearch: false });
   };
 
-  const handleSwitchToDestSearch = () => {
+  const handleUseCurrentStopAsDestination = () => {
+    if (screen.id !== "map") return;
+    setOriginOverride(null);
+    setSearching(false);
+    setSearchTarget("general");
+    setQuery("");
+    setScreen({ id: "destNav", destId: screen.stopId });
+  };
+
+  const handleSwitchToDestSearch = (initialQuery = "") => {
     setSearching(true);
-    setQuery("destination");
+    setSearchTarget("destination");
+    setQuery(initialQuery);
   };
 
   const handleSwitchToStopSearch = () => {
+    if (screen.id === "destNav") {
+      const isStopDestination =
+        !screen.destId.startsWith("dest-") &&
+        !screen.destId.startsWith("geo:");
+
+      if (isStopDestination) {
+        setSearching(false);
+        setSearchTarget("general");
+        setQuery("");
+        setScreen({ id: "map", stopId: screen.destId, fromSearch: true });
+        return;
+      }
+    }
+
     setSearching(true);
-    setQuery("bus stop");
+    setSearchTarget("general");
+    setQuery("");
+  };
+
+  const handleSwitchToOriginSearch = () => {
+    setSearching(true);
+    setSearchTarget("origin");
+    setQuery("");
   };
 
   return (
@@ -1321,10 +1648,14 @@ export default function App() {
         {searching ? (
           <SearchOverlay
             query={query}
+            target={searchTarget}
+            currentLocation={userPos ? { label: "Your location", pos: userPos } : null}
             onQueryChange={setQuery}
-            onClose={() => { setSearching(false); setQuery(""); }}
+            onClose={() => { setSearching(false); setSearchTarget("general"); setQuery(""); }}
             onSelectStop={handleSelectStop}
             onSelectDest={handleSelectDest}
+            onSelectOrigin={handleSelectOrigin}
+            onSelectCurrentLocation={handleSelectCurrentLocation}
           />
         ) : screen.id === "loading" ? (
           <div className="min-h-[844px] bg-white flex items-center justify-center">
@@ -1343,7 +1674,7 @@ export default function App() {
             onSearch={() => setSearching(true)}
             onOpenReport={handleOpenReport}
             onBack={() => setScreen({ id: "map", stopId: homeStopId, fromSearch: false })}
-            onSwitchToDest={handleSwitchToDestSearch}
+            onSwitchToDest={handleUseCurrentStopAsDestination}
             onSelectStop={stopId => setScreen({ id: "map", stopId, fromSearch: true })}
           />
         ) : screen.id === "busReport" ? (
@@ -1358,16 +1689,23 @@ export default function App() {
           <DestNavScreen
             destId={screen.destId}
             mapCenter={mapCenter}
+            originPos={effectiveOriginPos}
+            originLabel={effectiveOriginLabel}
             userPos={userPos}
             locationStatus={locationStatus}
             onStartNavigation={handleStartNavigation}
             onBack={handleBackFromDest}
+            onSearchOrigin={handleSwitchToOriginSearch}
+            onSearchDest={handleSwitchToDestSearch}
             onSwitchToStop={handleSwitchToStopSearch}
           />
         ) : screen.id === "navigation" ? (
           <NavScreen
             destId={screen.destId}
+            mode={screen.mode}
             mapCenter={mapCenter}
+            originPos={effectiveOriginPos}
+            originLabel={effectiveOriginLabel}
             userPos={userPos}
             locationStatus={locationStatus}
             onClose={handleCloseNavigation}

@@ -1,6 +1,6 @@
 import { apiRequest } from "./request";
 
-export type TransitSource = "mock" | "gtfs" | "ttc";
+export type TransitSource = "mock" | "gtfs" | "ttc" | "otp";
 
 export interface StopResult {
   source: TransitSource;
@@ -8,6 +8,7 @@ export interface StopResult {
   name: string;
   routes: string;
   distance: string;
+  pos?: [number, number];
 }
 
 export interface DestinationResult {
@@ -16,6 +17,7 @@ export interface DestinationResult {
   name: string;
   address: string;
   distance: string;
+  pos?: [number, number];
 }
 
 export interface NearbyStop {
@@ -75,12 +77,19 @@ export interface BusReport {
 
 export interface NavigationRoute {
   source: TransitSource;
+  available?: boolean;
+  message?: string;
   originCoordinates?: {
+    lat: number;
+    lng: number;
+  };
+  destinationCoordinates?: {
     lat: number;
     lng: number;
   };
   destName: string;
   destAddress: string;
+  durationMin?: number;
   walkMin: number;
   walkMeters: number;
   busStop: string;
@@ -90,6 +99,24 @@ export interface NavigationRoute {
   arrivalTime: string;
   totalStops: number;
   alsoAt: string[];
+  legs?: NavigationLeg[];
+}
+
+export type NavigationMode = "bus" | "car" | "walk" | "bike";
+
+export interface NavigationLeg {
+  mode: "WALK" | "BUS" | "STREETCAR" | "SUBWAY" | "CAR" | "BICYCLE" | "TRANSIT" | "OTHER";
+  fromName: string;
+  toName: string;
+  fromPos?: [number, number];
+  toPos?: [number, number];
+  durationMin: number;
+  distanceMeters?: number;
+  routeLabel?: string;
+  headsign?: string;
+  startTime?: string;
+  endTime?: string;
+  geometry?: [number, number][];
 }
 
 export interface StopMeta {
@@ -165,6 +192,7 @@ export function getNavigationRoute(
   origin: string,
   destination: string,
   originPos?: [number, number] | null,
+  mode: NavigationMode = "bus",
 ): Promise<NavigationRoute> {
   return apiRequest<NavigationRoute>("/api/ttc/navigation", {
     params: {
@@ -172,6 +200,7 @@ export function getNavigationRoute(
       destination,
       originLat: originPos?.[0],
       originLng: originPos?.[1],
+      mode,
     },
   });
 }

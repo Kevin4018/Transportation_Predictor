@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { existsSync } from "node:fs";
 
-type TransitSource = "mock" | "gtfs";
+type TransitSource = "mock" | "gtfs" | "otp";
 type ServicePeriod = "day" | "night";
 
 export interface StopResult {
@@ -10,6 +10,7 @@ export interface StopResult {
   name: string;
   routes: string;
   distance: string;
+  pos?: [number, number];
 }
 
 export interface DestinationResult {
@@ -18,6 +19,7 @@ export interface DestinationResult {
   name: string;
   address: string;
   distance: string;
+  pos?: [number, number];
 }
 
 export interface NearbyStop {
@@ -64,12 +66,19 @@ export interface BusReport {
 
 export interface NavigationRoute {
   source: TransitSource;
+  available?: boolean;
+  message?: string;
   originCoordinates?: {
+    lat: number;
+    lng: number;
+  };
+  destinationCoordinates?: {
     lat: number;
     lng: number;
   };
   destName: string;
   destAddress: string;
+  durationMin?: number;
   walkMin: number;
   walkMeters: number;
   busStop: string;
@@ -79,7 +88,25 @@ export interface NavigationRoute {
   arrivalTime: string;
   totalStops: number;
   alsoAt: string[];
+  legs?: NavigationLeg[];
 }
+
+export interface NavigationLeg {
+  mode: "WALK" | "BUS" | "STREETCAR" | "SUBWAY" | "CAR" | "BICYCLE" | "TRANSIT" | "OTHER";
+  fromName: string;
+  toName: string;
+  fromPos?: [number, number];
+  toPos?: [number, number];
+  durationMin: number;
+  distanceMeters?: number;
+  routeLabel?: string;
+  headsign?: string;
+  startTime?: string;
+  endTime?: string;
+  geometry?: [number, number][];
+}
+
+export type NavigationMode = "bus" | "car" | "walk" | "bike";
 
 export interface StopMeta {
   source: TransitSource;
@@ -111,6 +138,8 @@ interface StopRecord {
 interface DestinationRecord {
   name: string;
   address: string;
+  lat: number;
+  lng: number;
   distance: string;
   walkMin: number;
   walkMeters: number;
@@ -238,6 +267,108 @@ const getGtfsStopGroup = (db: Database.Database, stopId: string) => {
     id: `${GROUP_PREFIX}${representativeStop.stop_id}`,
     name: representativeStop.stop_name,
     stops,
+  };
+};
+
+const getGtfsStopDestination = (
+  db: Database.Database,
+  stopId: string,
+): DestinationRecord | null => {
+  const group = getGtfsStopGroup(db, stopId);
+  const representativeStop = group?.stops[0];
+  if (!group || !representativeStop) return null;
+
+  return {
+    name: group.name,
+    address: "TTC stop",
+    lat: representativeStop.stop_lat,
+    lng: representativeStop.stop_lon,
+    distance: "TTC stop",
+    walkMin: 0,
+    walkMeters: 0,
+    busStop: group.name,
+    routeLabel: "Transit",
+    etaMin: 0,
+    departureTime: "",
+    arrivalTime: "",
+    totalStops: 0,
+    alsoAt: [],
+  };
+};
+
+const GEO_DEST_PREFIX = "geo:";
+
+const encodeGeoDestinationId = (destination: DestinationRecord) =>
+  `${GEO_DEST_PREFIX}${Buffer.from(JSON.stringify(destination), "utf8").toString("base64url")}`;
+
+const decodeGeoDestination = (destination: string): DestinationRecord | null => {
+  if (!destination.startsWith(GEO_DEST_PREFIX)) return null;
+
+  try {
+    const parsed = JSON.parse(
+      Buffer.from(destination.slice(GEO_DEST_PREFIX.length), "base64url").toString("utf8"),
+    ) as Partial<DestinationRecord>;
+    if (
+      typeof parsed.name !== "string" ||
+      typeof parsed.address !== "string" ||
+      typeof parsed.lat !== "number" ||
+      typeof parsed.lng !== "number"
+    ) {
+      return null;
+    }
+
+    return {
+      name: parsed.name,
+      address: parsed.address,
+      lat: parsed.lat,
+      lng: parsed.lng,
+      distance: parsed.distance ?? "Toronto",
+      walkMin: 0,
+      walkMeters: 0,
+      busStop: parsed.name,
+      routeLabel: "Transit",
+      etaMin: 0,
+      departureTime: "",
+      arrivalTime: "",
+      totalStops: 0,
+      alsoAt: [],
+    };
+  } catch {
+    return null;
+  }
+};
+
+const getDestinationRecord = (destination: string): DestinationRecord | null => {
+  const geoDestination = decodeGeoDestination(destination);
+  if (geoDestination) return geoDestination;
+
+  const fixedDestination = DEST_DB[destination];
+  if (fixedDestination) return fixedDestination;
+
+  const db = getGtfsDb();
+  if (db) {
+    const gtfsDestination = getGtfsStopDestination(db, destination);
+    if (gtfsDestination) return gtfsDestination;
+  }
+
+  const stop = STOPS_DB[destination];
+  if (!stop) return null;
+
+  return {
+    name: stop.name,
+    address: "TTC stop",
+    lat: stop.pos[0],
+    lng: stop.pos[1],
+    distance: "TTC stop",
+    walkMin: 0,
+    walkMeters: 0,
+    busStop: stop.name,
+    routeLabel: "Transit",
+    etaMin: 0,
+    departureTime: "",
+    arrivalTime: "",
+    totalStops: 0,
+    alsoAt: [],
   };
 };
 
@@ -475,6 +606,8 @@ const DEST_DB: Record<string, DestinationRecord> = {
   "dest-spadina-nassau": {
     name: "Spadina at Nassau",
     address: "Spadina Ave, Toronto, ON",
+    lat: 43.6558,
+    lng: -79.4022,
     distance: "1.5 km",
     walkMin: 5,
     walkMeters: 350,
@@ -489,6 +622,8 @@ const DEST_DB: Record<string, DestinationRecord> = {
   "dest-spadina-dundas": {
     name: "Spadina at Dundas",
     address: "Spadina Ave, Toronto, ON",
+    lat: 43.6534,
+    lng: -79.3988,
     distance: "2 km",
     walkMin: 7,
     walkMeters: 480,
@@ -503,6 +638,8 @@ const DEST_DB: Record<string, DestinationRecord> = {
   "dest-cn-tower": {
     name: "CN Tower",
     address: "290 Bremner Blvd, Toronto, ON",
+    lat: 43.6426,
+    lng: -79.3871,
     distance: "3 km",
     walkMin: 5,
     walkMeters: 350,
@@ -517,6 +654,8 @@ const DEST_DB: Record<string, DestinationRecord> = {
   "dest-kensington": {
     name: "Kensington Market",
     address: "Kensington Ave, Toronto, ON",
+    lat: 43.6548,
+    lng: -79.4004,
     distance: "1.8 km",
     walkMin: 5,
     walkMeters: 350,
@@ -589,6 +728,7 @@ export const searchStops = (query: string): StopResult[] => {
       name: `bus stop: ${stop.stop_name}`,
       routes: toNumberRoutes((stop.route_names ?? "").split(",")).slice(0, 8).join(", "),
       distance: getServicePeriod() === "night" ? "Blue Night stop" : "TTC stop",
+      pos: [stop.stop_lat, stop.stop_lon],
     }));
   }
 
@@ -605,17 +745,188 @@ export const searchStops = (query: string): StopResult[] => {
       name: `bus stop: ${stop.name}`,
       routes: stop.routes.join(", "),
       distance: `${(0.6 + index * 0.3).toFixed(1)} km`,
+      pos: stop.pos,
     }))
     .slice(0, 5);
 };
 
-export const searchDestinations = (query: string): DestinationResult[] => {
+type NominatimResult = {
+  display_name?: string;
+  name?: string;
+  lat?: string;
+  lon?: string;
+  type?: string;
+  address?: {
+    road?: string;
+    neighbourhood?: string;
+    suburb?: string;
+    city?: string;
+  };
+};
+
+type PhotonFeature = {
+  properties?: {
+    name?: string;
+    street?: string;
+    housenumber?: string;
+    city?: string;
+    state?: string;
+    country?: string;
+    postcode?: string;
+    osm_value?: string;
+  };
+  geometry?: {
+    coordinates?: [number, number];
+  };
+};
+
+const toGeoDestinationResult = (
+  name: string,
+  address: string,
+  lat: number,
+  lng: number,
+  distance: string,
+): DestinationResult => {
+  const destination: DestinationRecord = {
+    name,
+    address,
+    lat,
+    lng,
+    distance,
+    walkMin: 0,
+    walkMeters: 0,
+    busStop: name,
+    routeLabel: "Transit",
+    etaMin: 0,
+    departureTime: "",
+    arrivalTime: "",
+    totalStops: 0,
+    alsoAt: [],
+  };
+
+  return {
+    source: "otp",
+    id: encodeGeoDestinationId(destination),
+    name: `destination: ${name}`,
+    address,
+    distance,
+    pos: [lat, lng],
+  };
+};
+
+const searchPhotonDestinations = async (query: string): Promise<DestinationResult[]> => {
+  const q = query.trim();
+  if (q.length < 2) return [];
+
+  const normalizedQuery = q.replace(/\bcenter\b/gi, "centre");
+  const url = new URL("https://photon.komoot.io/api/");
+  url.searchParams.set("q", `${normalizedQuery} toronto`);
+  url.searchParams.set("limit", "10");
+  url.searchParams.set("lat", "43.6532");
+  url.searchParams.set("lon", "-79.3832");
+
+  try {
+    const response = await fetch(url);
+    if (!response.ok) return [];
+
+    const data = await response.json() as { features?: PhotonFeature[] };
+    return (data.features ?? [])
+      .map((feature) => {
+        const [lng, lat] = feature.geometry?.coordinates ?? [];
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+
+        const props = feature.properties ?? {};
+        const name = props.name || [props.housenumber, props.street].filter(Boolean).join(" ") || q;
+        const address = [
+          [props.housenumber, props.street].filter(Boolean).join(" "),
+          props.city,
+          props.state,
+          props.postcode,
+          props.country,
+        ].filter(Boolean).join(", ");
+
+        return toGeoDestinationResult(
+          name,
+          address || "Toronto, Ontario",
+          lat,
+          lng,
+          props.osm_value ?? "place",
+        );
+      })
+      .filter((result): result is DestinationResult => result !== null);
+  } catch {
+    return [];
+  }
+};
+
+const searchNominatimDestinations = async (query: string): Promise<DestinationResult[]> => {
+  const q = query.trim();
+  if (q.length < 3) return [];
+
+  const url = new URL("https://nominatim.openstreetmap.org/search");
+  url.searchParams.set("format", "jsonv2");
+  url.searchParams.set("q", `${q.replace(/\bcenter\b/gi, "centre")}, Toronto, Ontario`);
+  url.searchParams.set("limit", "8");
+  url.searchParams.set("addressdetails", "1");
+
+  try {
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "TransportationPredictor/0.1 local prototype",
+      },
+    });
+    if (!response.ok) return [];
+    if (!response.headers.get("content-type")?.includes("application/json")) return [];
+
+    const rows = await response.json() as NominatimResult[];
+    return rows
+      .map((row) => {
+        const lat = Number(row.lat);
+        const lng = Number(row.lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+
+        const name =
+          row.name ||
+          row.address?.road ||
+          row.display_name?.split(",")[0] ||
+          q;
+        const address = row.display_name ?? "Toronto, Ontario";
+        return toGeoDestinationResult(
+          name,
+          address,
+          lat,
+          lng,
+          row.type ?? "Toronto",
+        );
+      })
+      .filter((result): result is DestinationResult => result !== null);
+  } catch {
+    return [];
+  }
+};
+
+export const searchDestinations = async (query: string): Promise<DestinationResult[]> => {
   const q = query.toLowerCase().trim();
+  if (!q) return [];
+
+  const liveResults = [
+    ...await searchPhotonDestinations(query),
+    ...await searchNominatimDestinations(query),
+  ];
+  if (liveResults.length > 0) {
+    const seen = new Set<string>();
+    return liveResults.filter((result) => {
+      if (!result.pos) return false;
+      const key = `${result.pos[0].toFixed(5)},${result.pos[1].toFixed(5)}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).slice(0, 10);
+  }
 
   return Object.entries(DEST_DB)
     .filter(
       ([, destination]) =>
-        !q ||
         destination.name.toLowerCase().includes(q) ||
         destination.address.toLowerCase().includes(q),
     )
@@ -625,6 +936,7 @@ export const searchDestinations = (query: string): DestinationResult[] => {
       name: `destination: ${destination.name}`,
       address: destination.address,
       distance: destination.distance,
+      pos: [destination.lat, destination.lng],
     }))
     .slice(0, 5);
 };
@@ -854,19 +1166,359 @@ export const getBusReport = (
   };
 };
 
+const decodePolyline = (encoded: string): [number, number][] => {
+  const points: [number, number][] = [];
+  let index = 0;
+  let lat = 0;
+  let lng = 0;
+
+  while (index < encoded.length) {
+    let result = 0;
+    let shift = 0;
+    let byte = 0;
+
+    do {
+      byte = encoded.charCodeAt(index++) - 63;
+      result |= (byte & 0x1f) << shift;
+      shift += 5;
+    } while (byte >= 0x20);
+
+    lat += result & 1 ? ~(result >> 1) : result >> 1;
+    result = 0;
+    shift = 0;
+
+    do {
+      byte = encoded.charCodeAt(index++) - 63;
+      result |= (byte & 0x1f) << shift;
+      shift += 5;
+    } while (byte >= 0x20);
+
+    lng += result & 1 ? ~(result >> 1) : result >> 1;
+    points.push([lat / 1e5, lng / 1e5]);
+  }
+
+  return points;
+};
+
+const formatOtpTime = (value: unknown) => {
+  const timestamp = typeof value === "number" ? value : Date.parse(String(value));
+  if (!Number.isFinite(timestamp)) return "";
+
+  return new Date(timestamp).toLocaleTimeString("en-CA", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "America/Toronto",
+  });
+};
+
+const formatOtpOffsetDateTime = (date: Date) => {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  const offsetMinutes = -date.getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? "+" : "-";
+  const absOffset = Math.abs(offsetMinutes);
+
+  return [
+    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
+    `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`,
+    `${sign}${pad(Math.floor(absOffset / 60))}:${pad(absOffset % 60)}`,
+  ].join("");
+};
+
+const getOtpPlanDateTime = () => {
+  const configured = process.env.OTP_PLAN_DATETIME;
+  if (configured && configured !== "match-weekday") return configured;
+
+  const feedStart = process.env.OTP_GTFS_SERVICE_START_DATE ?? "2026-06-21";
+  const [year, month, day] = feedStart.split("-").map(Number);
+  if (!year || !month || !day) return undefined;
+
+  const now = new Date();
+  const candidate = new Date(year, month - 1, day, now.getHours(), now.getMinutes(), now.getSeconds());
+  const dayOffset = (now.getDay() - candidate.getDay() + 7) % 7;
+  candidate.setDate(candidate.getDate() + dayOffset);
+
+  return formatOtpOffsetDateTime(candidate);
+};
+
+const getMinutesBetween = (from: unknown, to: unknown) => {
+  const fromTimestamp = typeof from === "number" ? from : Date.parse(String(from));
+  const toTimestamp = typeof to === "number" ? to : Date.parse(String(to));
+  if (!Number.isFinite(fromTimestamp) || !Number.isFinite(toTimestamp)) return undefined;
+
+  return Math.max(0, Math.round((toTimestamp - fromTimestamp) / 60000));
+};
+
+type OtpLeg = {
+  mode?: string;
+  headsign?: string;
+  from?: { name?: string; lat?: number; lon?: number };
+  to?: { name?: string; lat?: number; lon?: number };
+  distance?: number;
+  duration?: number;
+  transitLeg?: boolean;
+  start?: { scheduledTime?: string };
+  end?: { scheduledTime?: string };
+  route?: { shortName?: string; longName?: string } | null;
+  legGeometry?: { points?: string };
+};
+
+type OtpPlanResponse = {
+  data?: {
+    planConnection?: {
+      edges?: Array<{
+        node?: {
+          duration?: number;
+          walkDistance?: number;
+          start?: string;
+          end?: string;
+          legs?: OtpLeg[];
+        };
+      }>;
+      routingErrors?: Array<{ code?: string; description?: string }>;
+    };
+  };
+  errors?: Array<{ message?: string }>;
+};
+
+type OtpItinerary = {
+  duration?: number;
+  walkDistance?: number;
+  start?: string;
+  end?: string;
+  legs?: OtpLeg[];
+};
+
+const normalizeOtpMode = (mode?: string): NavigationLeg["mode"] => {
+  const normalized = (mode ?? "").toUpperCase();
+  if (normalized === "WALK") return "WALK";
+  if (normalized === "BUS") return "BUS";
+  if (normalized === "TRAM") return "STREETCAR";
+  if (normalized === "SUBWAY") return "SUBWAY";
+  if (normalized === "CAR") return "CAR";
+  if (normalized === "BICYCLE") return "BICYCLE";
+  if (normalized) return "TRANSIT";
+  return "OTHER";
+};
+
+const modeLabel = (mode: NavigationMode) => {
+  if (mode === "car") return "Drive";
+  if (mode === "bike") return "Bike";
+  if (mode === "walk") return "Walk";
+  return "Transit";
+};
+
+const getOtpNavigationRoute = async (
+  dest: DestinationRecord,
+  originCoordinates: { lat: number; lng: number },
+  mode: NavigationMode,
+): Promise<NavigationRoute | null> => {
+  const baseUrl = process.env.OTP_BASE_URL ?? "http://localhost:8080";
+  const url = new URL("/otp/gtfs/v1", baseUrl.replace(/\/$/, ""));
+  const modesByMode: Record<NavigationMode, string> = {
+    bus: "transit: { access: [WALK], egress: [WALK], transfer: [WALK] } transitOnly: true",
+    car: "direct: [CAR]",
+    walk: "direct: [WALK]",
+    bike: "direct: [BICYCLE]",
+  };
+  const planDateTime = getOtpPlanDateTime();
+  const dateTimeVariable = planDateTime ? "$planDateTime: OffsetDateTime!, " : "";
+  const dateTimeArgument = planDateTime ? "dateTime: { earliestDeparture: $planDateTime }" : "";
+  const query = `
+    query PlanRoute(${dateTimeVariable}$originLat: CoordinateValue!, $originLng: CoordinateValue!, $destLat: CoordinateValue!, $destLng: CoordinateValue!) {
+      planConnection(
+        origin: { label: "Origin", location: { coordinate: { latitude: $originLat, longitude: $originLng } } }
+        destination: { label: "Destination", location: { coordinate: { latitude: $destLat, longitude: $destLng } } }
+        ${dateTimeArgument}
+        modes: { ${modesByMode[mode]} }
+        first: 1
+      ) {
+        routingErrors { code description }
+        edges {
+          node {
+            duration
+            walkDistance
+            start
+            end
+            legs {
+              mode
+              transitLeg
+              duration
+              distance
+              headsign
+              start { scheduledTime }
+              end { scheduledTime }
+              from { name lat lon }
+              to { name lat lon }
+              route { shortName longName }
+              legGeometry { points }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query,
+        variables: {
+          ...(planDateTime ? { planDateTime } : {}),
+          originLat: originCoordinates.lat,
+          originLng: originCoordinates.lng,
+          destLat: dest.lat,
+          destLng: dest.lng,
+        },
+      }),
+    });
+    if (!response.ok) return getNavigationUnavailableRoute(dest, originCoordinates, mode);
+
+    const data = await response.json() as OtpPlanResponse;
+    if (data.errors?.length) return getNavigationUnavailableRoute(dest, originCoordinates, mode);
+
+    const itinerary: OtpItinerary | undefined = data.data?.planConnection?.edges?.[0]?.node;
+    if (!itinerary?.legs?.length) {
+      return getUnavailableNavigationRoute(
+        dest,
+        originCoordinates,
+        mode,
+        data.data?.planConnection?.routingErrors?.[0]?.description,
+      );
+    }
+
+    const legs: NavigationLeg[] = itinerary.legs.map((leg) => ({
+      mode: normalizeOtpMode(leg.mode),
+      fromName: leg.from?.name ?? "Origin",
+      toName: leg.to?.name ?? "Destination",
+      fromPos: leg.from?.lat !== undefined && leg.from?.lon !== undefined ? [leg.from.lat, leg.from.lon] : undefined,
+      toPos: leg.to?.lat !== undefined && leg.to?.lon !== undefined ? [leg.to.lat, leg.to.lon] : undefined,
+      durationMin: Math.max(1, Math.round((leg.duration ?? 0) / 60)),
+      distanceMeters: leg.distance === undefined ? undefined : Math.round(leg.distance),
+      routeLabel: leg.route?.shortName ?? leg.route?.longName,
+      headsign: leg.headsign,
+      startTime: formatOtpTime(leg.start?.scheduledTime),
+      endTime: formatOtpTime(leg.end?.scheduledTime),
+      geometry: leg.legGeometry?.points ? decodePolyline(leg.legGeometry.points) : undefined,
+    }));
+
+    const otpTransitLeg = itinerary.legs.find((leg) => leg.transitLeg);
+    const transitLeg = legs.find((leg) =>
+      leg.mode === "BUS" || leg.mode === "STREETCAR" || leg.mode === "SUBWAY" || leg.mode === "TRANSIT"
+    );
+    const transitEtaMin = getMinutesBetween(itinerary.start, otpTransitLeg?.start?.scheduledTime);
+    const walkMeters = Math.round(itinerary.walkDistance ?? legs
+      .filter((leg) => leg.mode === "WALK")
+      .reduce((sum, leg) => sum + (leg.distanceMeters ?? 0), 0));
+
+    return {
+      source: "otp",
+      available: true,
+      originCoordinates,
+      destinationCoordinates: { lat: dest.lat, lng: dest.lng },
+      destName: dest.name,
+      destAddress: dest.address,
+      durationMin: Math.max(1, Math.round((itinerary.duration ?? 0) / 60)),
+      walkMin: legs
+        .filter((leg) => leg.mode === "WALK")
+        .reduce((sum, leg) => sum + leg.durationMin, 0),
+      walkMeters,
+      busStop: transitLeg?.fromName ?? legs[0]?.toName ?? dest.name,
+      routeLabel: [transitLeg?.routeLabel, transitLeg?.headsign].filter(Boolean).join(" to ") || modeLabel(mode),
+      etaMin: transitEtaMin ?? Math.max(1, Math.round((itinerary.duration ?? 0) / 60)),
+      departureTime: formatOtpTime(itinerary.start) || legs[0]?.startTime || "",
+      arrivalTime: formatOtpTime(itinerary.end) || legs.at(-1)?.endTime || "",
+      totalStops: legs.filter((leg) => leg.mode !== "WALK").length,
+      alsoAt: [],
+      legs,
+    };
+  } catch {
+    return getNavigationUnavailableRoute(dest, originCoordinates, mode);
+  }
+};
+
+const getUnavailableNavigationRoute = (
+  dest: DestinationRecord,
+  originCoordinates: { lat: number; lng: number },
+  mode: NavigationMode,
+  detail?: string,
+): NavigationRoute => ({
+  source: "otp",
+  available: false,
+  message: detail ? `Cannot find ${modeLabel(mode).toLowerCase()} route.` : `Cannot find ${modeLabel(mode).toLowerCase()} route.`,
+  originCoordinates,
+  destinationCoordinates: { lat: dest.lat, lng: dest.lng },
+  destName: dest.name,
+  destAddress: dest.address,
+  durationMin: undefined,
+  walkMin: 0,
+  walkMeters: 0,
+  busStop: "",
+  routeLabel: modeLabel(mode),
+  etaMin: 0,
+  departureTime: "",
+  arrivalTime: "",
+  totalStops: 0,
+  alsoAt: [],
+  legs: [],
+});
+
+const getNavigationUnavailableRoute = (
+  dest: DestinationRecord,
+  originCoordinates: { lat: number; lng: number },
+  mode: NavigationMode,
+): NavigationRoute => ({
+  source: "otp",
+  available: false,
+  message: "Navigation unavailable.",
+  originCoordinates,
+  destinationCoordinates: { lat: dest.lat, lng: dest.lng },
+  destName: dest.name,
+  destAddress: dest.address,
+  durationMin: undefined,
+  walkMin: 0,
+  walkMeters: 0,
+  busStop: "",
+  routeLabel: modeLabel(mode),
+  etaMin: 0,
+  departureTime: "",
+  arrivalTime: "",
+  totalStops: 0,
+  alsoAt: [],
+  legs: [],
+});
+
 export const getNavigationRoute = (
   origin: string,
   destination: string,
   originCoordinates?: { lat: number; lng: number },
-): NavigationRoute => {
-  const dest = DEST_DB[destination];
+  mode: NavigationMode = "bus",
+): Promise<NavigationRoute> => {
+  const dest = getDestinationRecord(destination);
   if (!dest) throw new Error(`Unknown destination: ${destination}`);
 
   void origin;
 
+  if (originCoordinates) {
+    return getOtpNavigationRoute(dest, originCoordinates, mode)
+      .then((route) => route ?? getUnavailableNavigationRoute(dest, originCoordinates, mode));
+  }
+
+  return Promise.resolve(getMockNavigationRoute(dest, originCoordinates));
+};
+
+const getMockNavigationRoute = (
+  dest: DestinationRecord,
+  originCoordinates?: { lat: number; lng: number },
+): NavigationRoute => {
+
   return {
     source: "mock",
+    available: true,
     ...(originCoordinates ? { originCoordinates } : {}),
+    destinationCoordinates: { lat: dest.lat, lng: dest.lng },
     destName: dest.name,
     destAddress: dest.address,
     walkMin: dest.walkMin,

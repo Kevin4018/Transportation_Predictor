@@ -9,6 +9,7 @@ import {
   searchDestinations,
   searchStops,
 } from "../services/ttcService";
+import type { NavigationMode } from "../services/ttcService";
 
 const router = Router();
 
@@ -17,12 +18,21 @@ const parseNumber = (value: unknown, fallback = 0) => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
+const parseNavigationMode = (value: unknown): NavigationMode => {
+  const mode = String(value ?? "bus");
+  return mode === "car" || mode === "walk" || mode === "bike" ? mode : "bus";
+};
+
 router.get("/stops/search", (req, res) => {
   res.json(searchStops(String(req.query.q ?? "")));
 });
 
-router.get("/destinations/search", (req, res) => {
-  res.json(searchDestinations(String(req.query.q ?? "")));
+router.get("/destinations/search", async (req, res, next) => {
+  try {
+    res.json(await searchDestinations(String(req.query.q ?? "")));
+  } catch (error) {
+    next(error);
+  }
 });
 
 router.get("/stops/nearby", (req, res) => {
@@ -68,7 +78,7 @@ router.get("/bus-report", (req, res, next) => {
   }
 });
 
-router.get("/navigation", (req, res, next) => {
+router.get("/navigation", async (req, res, next) => {
   try {
     const originLat = Number(req.query.originLat);
     const originLng = Number(req.query.originLng);
@@ -78,10 +88,11 @@ router.get("/navigation", (req, res, next) => {
         : undefined;
 
     res.json(
-      getNavigationRoute(
+      await getNavigationRoute(
         String(req.query.origin ?? ""),
         String(req.query.destination ?? ""),
         originCoordinates,
+        parseNavigationMode(req.query.mode),
       ),
     );
   } catch (error) {
