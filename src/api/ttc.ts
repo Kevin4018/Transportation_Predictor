@@ -143,6 +143,9 @@ export interface TransitAssistantContext {
   navigationEtaMin?: number;
   navigationArrivalTime?: string;
   pendingRouteClarification?: number;
+  pendingUnknownRoute?: number;
+  pendingSuggestedRoute?: number;
+  lastTargetTimeIso?: string;
   lastIntent?: TransitAssistantAnswer["matchedIntent"];
 }
 
@@ -278,6 +281,11 @@ function isRouteNumberOnlyDestination(query: string | undefined): number | undef
   return routeId ? Number(routeId) : undefined;
 }
 
+async function routeHasStops(routeId: number): Promise<boolean> {
+  const stops = await searchStops(String(routeId));
+  return stops.some(stop => stop.routes.split(",").map(route => Number(route.trim())).includes(routeId));
+}
+
 function isRouteNumberOnlyInput(input: string): boolean {
   return /^([1-9]\d{1,2})$/.test(input.trim());
 }
@@ -360,13 +368,27 @@ function isRouteTerminalQuestion(input: string): boolean {
 }
 
 function isTimeFollowUp(input: string): boolean {
-  return /\b(?:what\s+about|how\s+about|tomorrow|tonight|this evening|later|then|(?:in\s+)?(?:\d+|one|two|three|four|five|six)\s+(?:minute|minutes|hour|hours)(?:\s+later|\s+from\s+now)?|(?:at|around)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\b/i.test(input);
+  return /\b(?:what\s+about|how\s+about|tomorrow|tonight|this evening|later|then|(?:in\s+)?(?:another\s+)?(?:\d+|one|two|three|four|five|six)\s+(?:more\s+)?(?:minute|minutes|hour|hours)(?:\s+later|\s+from\s+now)?|(?:at|around)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\b/i.test(input);
 }
 
-function parseAssistantTargetTime(input: string): Date | undefined {
+function isChainedTimeFollowUp(input: string): boolean {
+  return /\b(?:another|more|after\s+that|afterward|afterwards|from\s+then|from\s+that|later\s+than\s+that|again)\b/i.test(input);
+}
+
+function getLastTargetTime(context: TransitAssistantContext): Date | undefined {
+  if (!context.lastTargetTimeIso) return undefined;
+
+  const target = new Date(context.lastTargetTimeIso);
+  return Number.isNaN(target.getTime()) ? undefined : target;
+}
+
+function getTimeBase(input: string, context: TransitAssistantContext): Date {
+  return isChainedTimeFollowUp(input) ? getLastTargetTime(context) ?? new Date() : new Date();
+}
+
+function parseAssistantTargetTime(input: string, baseTime = new Date()): Date | undefined {
   const text = input.toLowerCase();
-  const now = new Date();
-  const relative = text.match(/\b(?:in\s+)?(\d+|one|two|three|four|five|six)\s+(minute|minutes|hour|hours)(?:\s+later|\s+from\s+now)?\b/);
+  const relative = text.match(/\b(?:in\s+)?(?:another\s+)?(\d+|one|two|three|four|five|six)\s+(?:more\s+)?(minute|minutes|hour|hours)(?:\s+later|\s+from\s+now)?\b/);
   const wordNumbers: Record<string, number> = {
     one: 1,
     two: 2,
@@ -381,20 +403,20 @@ function parseAssistantTargetTime(input: string): Date | undefined {
     const milliseconds = relative[2].startsWith("hour")
       ? amount * 60 * 60 * 1000
       : amount * 60 * 1000;
-    return new Date(now.getTime() + milliseconds);
+    return new Date(baseTime.getTime() + milliseconds);
   }
 
   if (/\btomorrow\b/.test(text)) {
-    const target = new Date(now);
+    const target = new Date(baseTime);
     target.setDate(target.getDate() + 1);
     target.setHours(9, 0, 0, 0);
     return target;
   }
 
   if (/\btonight\b|\bthis evening\b/.test(text)) {
-    const target = new Date(now);
+    const target = new Date(baseTime);
     target.setHours(20, 0, 0, 0);
-    if (target.getTime() <= now.getTime()) target.setDate(target.getDate() + 1);
+    if (target.getTime() <= baseTime.getTime()) target.setDate(target.getDate() + 1);
     return target;
   }
 
@@ -408,9 +430,9 @@ function parseAssistantTargetTime(input: string): Date | undefined {
     if (suffix === "am" && hour === 12) hour = 0;
     if (!suffix && hour >= 1 && hour <= 7) hour += 12;
 
-    const target = new Date(now);
+    const target = new Date(baseTime);
     target.setHours(hour, minute, 0, 0);
-    if (target.getTime() <= now.getTime()) target.setDate(target.getDate() + 1);
+    if (target.getTime() <= baseTime.getTime()) target.setDate(target.getDate() + 1);
     return target;
   }
 
@@ -419,7 +441,7 @@ function parseAssistantTargetTime(input: string): Date | undefined {
 
 function parseRelativeTargetOffsetMinutes(input: string): number | undefined {
   const text = input.toLowerCase();
-  const relative = text.match(/\b(?:in\s+)?(\d+|one|two|three|four|five|six)\s+(minute|minutes|hour|hours)(?:\s+later|\s+from\s+now)?\b/);
+  const relative = text.match(/\b(?:in\s+)?(?:another\s+)?(\d+|one|two|three|four|five|six)\s+(?:more\s+)?(minute|minutes|hour|hours)(?:\s+later|\s+from\s+now)?\b/);
   const wordNumbers: Record<string, number> = {
     one: 1,
     two: 2,
@@ -466,7 +488,7 @@ function calculateDestinationTiming(
   input: string,
   route: NavigationRoute,
   context: TransitAssistantContext,
-): { etaMin: number; arrivalTime: string; timingNote?: string } {
+): { etaMin: number; arrivalTime: string; timingNote?: string; targetTime?: Date } {
   if (isNextVehicleFollowUp(input)) {
     const nextVehicleGap = route.alsoAt
       .map(parseDurationMinutes)
@@ -483,7 +505,7 @@ function calculateDestinationTiming(
     };
   }
 
-  const targetTime = parseAssistantTargetTime(input);
+  const targetTime = parseAssistantTargetTime(input, getTimeBase(input, context));
   if (!targetTime) {
     return { etaMin: route.etaMin, arrivalTime: route.arrivalTime };
   }
@@ -496,6 +518,7 @@ function calculateDestinationTiming(
       etaMin: route.etaMin + relativeOffset,
       arrivalTime: formatTransitClockMinutes(scheduledArrival + relativeOffset),
       timingNote: `Leaving ${relativeOffset} min later,`,
+      targetTime,
     };
   }
 
@@ -510,6 +533,7 @@ function calculateDestinationTiming(
       etaMin: Math.max(0, Math.round((targetTime.getTime() - Date.now()) / 60000)),
       arrivalTime: formatTransitClockMinutes(targetMinutes + tripDuration),
       timingNote: `Leaving around ${formatTransitTime(targetTime)},`,
+      targetTime,
     };
   }
 
@@ -517,6 +541,7 @@ function calculateDestinationTiming(
     etaMin: Math.max(0, Math.round((targetTime.getTime() - Date.now()) / 60000)),
     arrivalTime: formatTransitTime(targetTime),
     timingNote: `Around ${formatTransitTime(targetTime)},`,
+    targetTime,
   };
 }
 
@@ -645,7 +670,7 @@ function describeTrafficLevel(delayMin: number): string {
 }
 
 async function answerWeatherQuestion(input: string, context: TransitAssistantContext): Promise<TransitAssistantAnswer> {
-  const targetTime = parseAssistantTargetTime(input);
+  const targetTime = parseAssistantTargetTime(input, getTimeBase(input, context));
 
   try {
     if (targetTime && targetTime.getTime() - Date.now() > 20 * 60 * 1000) {
@@ -670,7 +695,7 @@ async function answerWeatherQuestion(input: string, context: TransitAssistantCon
       return {
         matchedIntent: "weather",
         confidence: 84,
-        context: { ...context, lastIntent: "weather" },
+        context: { ...context, lastTargetTimeIso: targetTime.toISOString(), lastIntent: "weather" },
         text: describeForecastWeather(closest, targetTime, forecast.locationName),
       };
     }
@@ -679,7 +704,11 @@ async function answerWeatherQuestion(input: string, context: TransitAssistantCon
     return {
       matchedIntent: "weather",
       confidence: 88,
-      context: { ...context, lastIntent: "weather" },
+      context: {
+        ...context,
+        lastTargetTimeIso: targetTime?.toISOString() ?? new Date().toISOString(),
+        lastIntent: "weather",
+      },
       text: describeCurrentWeather(weather),
     };
   } catch {
@@ -693,7 +722,7 @@ async function answerWeatherQuestion(input: string, context: TransitAssistantCon
 }
 
 async function answerTrafficQuestion(input: string, context: TransitAssistantContext): Promise<TransitAssistantAnswer> {
-  const targetTime = parseAssistantTargetTime(input);
+  const targetTime = parseAssistantTargetTime(input, getTimeBase(input, context));
   const routeId = findRouteInText(input) ?? context.routeId ?? 501;
 
   try {
@@ -707,7 +736,12 @@ async function answerTrafficQuestion(input: string, context: TransitAssistantCon
     return {
       matchedIntent: "traffic",
       confidence: targetTime ? 78 : 82,
-      context: { ...context, routeId, lastIntent: "traffic" },
+      context: {
+        ...context,
+        routeId,
+        lastTargetTimeIso: targetTime?.toISOString() ?? new Date().toISOString(),
+        lastIntent: "traffic",
+      },
       text: `${when}, ${describeTrafficLevel(impact.trafficDelayMin)} traffic is expected${routeText}. ${delayText}.`,
     };
   } catch {
@@ -776,6 +810,7 @@ async function answerDestinationQuestion(
     destinationId,
     navigationEtaMin: timing.etaMin,
     navigationArrivalTime: timing.arrivalTime,
+    lastTargetTimeIso: timing.targetTime?.toISOString() ?? context.lastTargetTimeIso,
     lastIntent: "navigation" as const,
   };
   const intro = timing.timingNote
@@ -829,6 +864,66 @@ function answerRouteClarification(input: string, context: TransitAssistantContex
         lastIntent: "navigation",
       },
       text: "Okay. What destination do you want to go to?",
+    };
+  }
+
+  return null;
+}
+
+async function answerUnknownRouteClarification(
+  input: string,
+  context: TransitAssistantContext,
+): Promise<TransitAssistantAnswer | null> {
+  const unknownRoute = context.pendingUnknownRoute;
+  if (!unknownRoute) return null;
+
+  const suggestedRoute = context.pendingSuggestedRoute;
+  if (isYes(input) && suggestedRoute) {
+    try {
+      const { prediction, context: nextContext } = await pickAssistantPrediction(String(suggestedRoute), {
+        ...context,
+        routeId: suggestedRoute,
+        pendingUnknownRoute: undefined,
+        pendingSuggestedRoute: undefined,
+      });
+      const { confidence, summary } = describePrediction(prediction);
+      const stopName = prediction.stopName.replace(/[.]+$/, "");
+
+      return {
+        matchedIntent: "eta",
+        confidence,
+        context: {
+          ...nextContext,
+          pendingUnknownRoute: undefined,
+          pendingSuggestedRoute: undefined,
+          lastIntent: "eta",
+        },
+        text: `Route ${prediction.routeId} ${prediction.direction} is estimated in ${prediction.etaMin} min at ${stopName}. ${summary}. Confidence: ${confidence}%.`,
+      };
+    } catch {
+      return {
+        matchedIntent: "help",
+        confidence: 62,
+        context: {
+          ...context,
+          pendingUnknownRoute: undefined,
+          pendingSuggestedRoute: undefined,
+        },
+        text: `Okay. Ask with a stop too, like "when is ${suggestedRoute} at Spadina?"`,
+      };
+    }
+  }
+
+  if (isNo(input)) {
+    return {
+      matchedIntent: "help",
+      confidence: 78,
+      context: {
+        ...context,
+        pendingUnknownRoute: undefined,
+        pendingSuggestedRoute: undefined,
+      },
+      text: "Okay. Which route number or stop did you mean?",
     };
   }
 
@@ -1005,6 +1100,9 @@ export async function askTransitAssistant(
     };
   }
 
+  const unknownRouteAnswer = await answerUnknownRouteClarification(q, context);
+  if (unknownRouteAnswer) return unknownRouteAnswer;
+
   const clarificationAnswer = answerRouteClarification(q, context);
   if (clarificationAnswer) return clarificationAnswer;
 
@@ -1044,6 +1142,24 @@ export async function askTransitAssistant(
   }
 
   try {
+    const explicitRoute = findRouteInText(q);
+    if (explicitRoute && !(await routeHasStops(explicitRoute))) {
+      const suggestedRoute = context.routeId;
+      return {
+        matchedIntent: "help",
+        confidence: 84,
+        context: {
+          ...context,
+          pendingUnknownRoute: explicitRoute,
+          pendingSuggestedRoute: suggestedRoute,
+          lastIntent: "help",
+        },
+        text: suggestedRoute
+          ? `I could not find route ${explicitRoute}. Did you mean route ${suggestedRoute}?`
+          : `I could not find route ${explicitRoute}. Which route or stop did you mean?`,
+      };
+    }
+
     const { prediction, context: nextContext } = await pickAssistantPrediction(q, context);
     const { confidence, summary } = describePrediction(prediction);
     const stopName = prediction.stopName.replace(/[.]+$/, "");
