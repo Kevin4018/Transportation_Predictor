@@ -24,11 +24,12 @@ interface LeafletMapProps {
   selectedStopId?: string;
   onSelectStop?: (id: string) => void;
   onMoveEnd?: (center: [number, number]) => void;
+  onZoomEnd?: (zoom: number) => void;
   className?: string;
 }
 
 /** Pure-DOM Leaflet map — no react-leaflet context, works with any React version */
-function LeafletMap({ center, zoom, userPos, locationStatus, stops, routeLine, destinationPos, transitMarkers, selectedStopId, onSelectStop, onMoveEnd, className }: LeafletMapProps) {
+function LeafletMap({ center, zoom, userPos, locationStatus, stops, routeLine, destinationPos, transitMarkers, selectedStopId, onSelectStop, onMoveEnd, onZoomEnd, className }: LeafletMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
   const userMarkerRef = useRef<L.Marker | null>(null);
@@ -83,6 +84,7 @@ function LeafletMap({ center, zoom, userPos, locationStatus, stops, routeLine, d
 
     map.on("zoomend", () => {
       skipNextMoveEndRef.current = false;
+      onZoomEnd?.(map.getZoom());
       window.requestAnimationFrame(() => map.invalidateSize({ animate: false }));
     });
 
@@ -623,6 +625,7 @@ function MapScreen({ stopId, showControls, mapCenter, userPos, locationStatus, o
   const [loadingPrediction, setLoadingPrediction] = useState(true);
   const [selectedRoute, setSelectedRoute] = useState<number | null>(null);
   const [dir, setDir] = useState<string | null>(null);
+  const [mapZoom, setMapZoom] = useState(15);
   const [nearbyStops, setNearbyStops] = useState<NearbyStop[]>([]);
   const [weather, setWeather] = useState<CurrentWeather | null>(null);
   const [trafficImpact, setTrafficImpact] = useState<TrafficImpact | null>(null);
@@ -735,12 +738,13 @@ function MapScreen({ stopId, showControls, mapCenter, userPos, locationStatus, o
         <div className="rounded-[12px] overflow-hidden h-[280px] w-full">
           <LeafletMap
             center={mapCenter}
-            zoom={15}
+            zoom={mapZoom}
             userPos={userPos}
             locationStatus={locationStatus}
             stops={nearbyStops}
             selectedStopId={stopId}
             onSelectStop={onSelectStop}
+            onZoomEnd={setMapZoom}
             onMoveEnd={center => {
               onMapMove(center);
               getNearbyStops(center[0], center[1]).then(setNearbyStops);
