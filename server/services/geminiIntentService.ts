@@ -45,6 +45,10 @@ interface GeminiGenerateContentResponse {
   }>;
 }
 
+function isIntentDebugEnabled(): boolean {
+  return process.env.GEMINI_INTENT_DEBUG === "true";
+}
+
 function extractJson(text: string): unknown {
   const trimmed = text.trim();
 
@@ -132,6 +136,15 @@ export async function classifyTransitAssistantIntent(
 
   if (!response.ok) {
     const details = await response.text();
+    if (isIntentDebugEnabled()) {
+      console.log("[milkbot intent error]", {
+        input,
+        context,
+        model,
+        status: response.status,
+        details,
+      });
+    }
     throw new Error(`Gemini intent request failed: ${response.status} ${details}`);
   }
 
@@ -145,5 +158,18 @@ export async function classifyTransitAssistantIntent(
     throw new Error("Gemini intent response was empty");
   }
 
-  return normalizeIntentResult(extractJson(text));
+  const result = normalizeIntentResult(extractJson(text));
+
+  if (isIntentDebugEnabled()) {
+    console.log("[milkbot intent]", {
+      input,
+      context,
+      model,
+      intent: result.intent,
+      confidence: result.confidence,
+      reason: result.reason,
+    });
+  }
+
+  return result;
 }

@@ -1399,7 +1399,7 @@ export async function askTransitAssistant(
       matchedIntent: "out-of-scope",
       confidence: 82,
       context,
-      text: "I can help with TTC trip questions like arrival times, nearby stops, route delays, traffic, weather, and navigation.",
+      text: "This question seems irrelevant. Try ask about TTC trip questions, like arrival times, nearby stops, route delays, traffic, weather, and navigation.",
     };
   }
 
