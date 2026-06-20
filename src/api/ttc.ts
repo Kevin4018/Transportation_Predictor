@@ -283,11 +283,31 @@ function isRouteNumberOnlyDestination(query: string | undefined): number | undef
 
 async function routeHasStops(routeId: number): Promise<boolean> {
   const stops = await searchStops(String(routeId));
-  return stops.some(stop => stop.routes.split(",").map(route => Number(route.trim())).includes(routeId));
+  return stops.some(stop => stopServesRoute(stop, routeId));
 }
 
 function isRouteNumberOnlyInput(input: string): boolean {
   return /^([1-9]\d{1,2})$/.test(input.trim());
+}
+
+function getStopRoutes(stop: StopResult): number[] {
+  return stop.routes.split(",").map(route => Number(route.trim())).filter(Number.isFinite);
+}
+
+function stopServesRoute(stop: StopResult, routeId: number): boolean {
+  return getStopRoutes(stop).includes(routeId);
+}
+
+function normalizeStopText(input: string): string {
+  return input.toLowerCase().replace(/\bbus stop:\s*/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+async function findRouteStopByQuery(routeId: number, stopQuery: string): Promise<StopResult | undefined> {
+  const normalizedQuery = normalizeStopText(stopQuery);
+  if (!normalizedQuery) return undefined;
+
+  const routeStops = await searchStops(String(routeId));
+  return routeStops.find(stop => stopServesRoute(stop, routeId) && normalizeStopText(stop.name).includes(normalizedQuery));
 }
 
 function extractStopQuery(input: string): string | undefined {
@@ -1038,7 +1058,8 @@ async function pickAssistantPrediction(
 
     if (stopQuery) {
       const routeStops = await searchStops(stopQuery);
-      const matchingStop = routeStops.find(stop => stop.routes.split(",").map(route => Number(route.trim())).includes(routeId));
+      const matchingStop = routeStops.find(stop => stopServesRoute(stop, routeId))
+        ?? await findRouteStopByQuery(routeId, stopQuery);
       if (matchingStop) {
         stopId = matchingStop.id;
         meta = await getStopMeta(stopId);
