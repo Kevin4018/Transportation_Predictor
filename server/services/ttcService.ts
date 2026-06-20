@@ -191,7 +191,11 @@ let gtfsDb: Database.Database | null | undefined;
 const getGtfsDb = () => {
   if (gtfsDb !== undefined) return gtfsDb;
 
-  const dbPath = process.env.GTFS_DB_PATH ?? "./data/gtfs.sqlite";
+  const dbPath = process.env.GTFS_DB_PATH ?? (
+    existsSync("./data/gtfs.sqlite")
+      ? "./data/gtfs.sqlite"
+      : "./data/gtfs-slim.sqlite"
+  );
 
   if (!existsSync(dbPath)) {
     gtfsDb = null;
@@ -770,12 +774,38 @@ export const getStopMeta = (stopId: string): StopMeta => {
   };
 };
 
+const STOP_QUERY_FILLER_WORDS = new Set([
+  "at",
+  "and",
+  "near",
+  "by",
+  "the",
+  "stop",
+  "station",
+  "bus",
+  "streetcar",
+  "st",
+  "street",
+  "ave",
+  "avenue",
+  "rd",
+  "road",
+]);
+
+const getStopQueryTokens = (query: string): string[] =>
+  query
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length > 1 && !STOP_QUERY_FILLER_WORDS.has(token));
+
 export const searchStops = (query: string): StopResult[] => {
   const db = getGtfsDb();
   const q = query.toLowerCase().trim();
 
   if (db) {
-    const rows = db
+    let rows = db
       .prepare(`
         SELECT
           MIN(CAST(stops.stop_id AS INTEGER)) AS stop_id,
@@ -795,6 +825,32 @@ export const searchStops = (query: string): StopResult[] => {
         LIMIT 8
       `)
       .all(q, `%${q}%`, `%${q}%`, `%${q}%`, servicePeriodParam()) as Array<GtfsStop & { route_names: string }>;
+
+    const tokens = getStopQueryTokens(q);
+    if (!rows.length && tokens.length > 1) {
+      const tokenRows = db
+        .prepare(`
+          SELECT
+            MIN(CAST(stops.stop_id AS INTEGER)) AS stop_id,
+            stops.stop_name,
+            AVG(stops.stop_lat) AS stop_lat,
+            AVG(stops.stop_lon) AS stop_lon,
+            GROUP_CONCAT(DISTINCT stop_routes.route_name) AS route_names
+          FROM stops
+          JOIN stop_routes ON stop_routes.stop_id = stops.stop_id
+          WHERE stop_routes.service_period = ?
+          GROUP BY stops.stop_name
+          ORDER BY stop_name
+        `)
+        .all(servicePeriodParam()) as Array<GtfsStop & { route_names: string }>;
+
+      rows = tokenRows
+        .filter((stop) => {
+          const name = stop.stop_name.toLowerCase();
+          return tokens.every((token) => name.includes(token));
+        })
+        .slice(0, 8);
+    }
 
     return rows.map((stop) => ({
       source: "gtfs",
