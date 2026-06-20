@@ -805,7 +805,48 @@ export const searchStops = (query: string): StopResult[] => {
   const q = query.toLowerCase().trim();
 
   if (db) {
-    let rows = db
+    const isNumericRouteQuery = /^[1-9]\d{1,2}$/.test(q);
+    let rows = isNumericRouteQuery
+      ? db
+        .prepare(`
+          SELECT
+            MIN(CAST(stops.stop_id AS INTEGER)) AS stop_id,
+            stops.stop_name,
+            AVG(stops.stop_lat) AS stop_lat,
+            AVG(stops.stop_lon) AS stop_lon,
+            GROUP_CONCAT(DISTINCT stop_routes.route_name) AS route_names
+          FROM stops
+          JOIN stop_routes ON stop_routes.stop_id = stops.stop_id
+          WHERE stop_routes.route_name = ?
+            AND stop_routes.service_period = ?
+          GROUP BY stops.stop_name
+          ORDER BY stop_name
+          LIMIT 8
+        `)
+        .all(q, servicePeriodParam()) as Array<GtfsStop & { route_names: string }>
+      : [];
+
+    if (!rows.length && isNumericRouteQuery) {
+      rows = db
+        .prepare(`
+          SELECT
+            MIN(CAST(stops.stop_id AS INTEGER)) AS stop_id,
+            stops.stop_name,
+            AVG(stops.stop_lat) AS stop_lat,
+            AVG(stops.stop_lon) AS stop_lon,
+            GROUP_CONCAT(DISTINCT stop_routes.route_name) AS route_names
+          FROM stops
+          JOIN stop_routes ON stop_routes.stop_id = stops.stop_id
+          WHERE stop_routes.route_name = ?
+          GROUP BY stops.stop_name
+          ORDER BY stop_name
+          LIMIT 8
+        `)
+        .all(q) as Array<GtfsStop & { route_names: string }>;
+    }
+
+    if (!rows.length) {
+      rows = db
       .prepare(`
         SELECT
           MIN(CAST(stops.stop_id AS INTEGER)) AS stop_id,
@@ -825,6 +866,7 @@ export const searchStops = (query: string): StopResult[] => {
         LIMIT 8
       `)
       .all(q, `%${q}%`, `%${q}%`, `%${q}%`, servicePeriodParam()) as Array<GtfsStop & { route_names: string }>;
+    }
 
     const tokens = getStopQueryTokens(q);
     if (!rows.length && tokens.length > 1) {

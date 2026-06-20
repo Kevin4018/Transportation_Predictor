@@ -1341,6 +1341,20 @@ export async function askTransitAssistant(
       };
     }
 
+    if (explicitRoute && isRouteNumberOnlyInput(q) && !context.stopId) {
+      return {
+        matchedIntent: "help",
+        confidence: 78,
+        context: {
+          ...context,
+          routeId: explicitRoute,
+          pendingRouteClarification: explicitRoute,
+          lastIntent: "help",
+        },
+        text: `Route ${explicitRoute} needs a stop before I can estimate arrival time. Try asking "when is ${explicitRoute} at Spadina?"`,
+      };
+    }
+
     const { prediction, context: nextContext } = await pickAssistantPrediction(q, context);
     const { confidence, summary } = describePrediction(prediction);
     const stopName = prediction.stopName.replace(/[.]+$/, "");
