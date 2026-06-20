@@ -2,6 +2,7 @@ import cors from "cors";
 import "dotenv/config";
 import express from "express";
 
+import constructionRouter from "./routes/construction";
 import ttcRouter from "./routes/ttc";
 import trafficRouter from "./routes/traffic";
 import weatherRouter from "./routes/weather";
@@ -19,6 +20,7 @@ app.get("/api/health", (_req, res) => {
 app.use("/api/weather", weatherRouter);
 app.use("/api/ttc", ttcRouter);
 app.use("/api/traffic", trafficRouter);
+app.use("/api/construction", constructionRouter);
 
 app.use(
   (

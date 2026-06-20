@@ -4,6 +4,8 @@ import imgBike from "@/imports/DestinationNavigation/cb0afd1c8831cacec947b71a1ac
 import imgMilk from "@/imports/Map501WestboundSelected-2/e8d0b21b247328a8e92836e60bd74ba4fda1cb94.png";
 
 const TORONTO: [number, number] = [43.6532, -79.3832];
+const DESIGN_WIDTH = 390;
+const DESIGN_HEIGHT = 844;
 type LocationStatus = "locating" | "ready" | "denied" | "unavailable" | "timeout";
 
 interface LeafletMapProps {
@@ -168,6 +170,10 @@ import {
   getTrafficImpact,
   type TrafficImpact,
 } from "@/api/traffic";
+import {
+  getConstructionImpact,
+  type ConstructionImpact,
+} from "@/api/construction";
 
 function estimateWeatherDelay(weather: CurrentWeather): number {
   const condition = weather.condition.toLowerCase();
@@ -205,6 +211,18 @@ function describeTrafficDelay(impact: TrafficImpact, key: "traffic" | "accident"
   if (key === "traffic") return "Traffic is normal, no additional delay expected.";
   if (key === "accident") return "No traffic incidents are reported near this route.";
   return "No construction activity is reported near this route.";
+}
+
+function describeConstructionDelay(impact: ConstructionImpact) {
+  const event = impact.events[0];
+
+  if (!event) {
+    return impact.source === "geojson"
+      ? "No nearby road reconstruction projects are listed in the static dataset."
+      : "No construction dataset is configured yet.";
+  }
+
+  return `${event.title}. ${event.description} (${event.distanceKm.toFixed(1)} km away).`;
 }
 
 function estimateConfidenceFromFactors(factors: BusReportData["factors"]) {
@@ -411,6 +429,8 @@ function MapScreen({ stopId, showControls, mapCenter, userPos, locationStatus, o
   const [dir, setDir] = useState<string | null>(null);
   const [nearbyStops, setNearbyStops] = useState<NearbyStop[]>([]);
   const [weather, setWeather] = useState<CurrentWeather | null>(null);
+  const [trafficImpact, setTrafficImpact] = useState<TrafficImpact | null>(null);
+  const [constructionImpact, setConstructionImpact] = useState<ConstructionImpact | null>(null);
 
   // Bootstrap: load stop metadata, pick defaults, then fetch first prediction
   useEffect(() => {
@@ -463,15 +483,37 @@ function MapScreen({ stopId, showControls, mapCenter, userPos, locationStatus, o
     return () => { cancelled = true; };
   }, [mapCenter[0], mapCenter[1]]);
 
+  useEffect(() => {
+    if (selectedRoute === null) return;
+    let cancelled = false;
+
+    Promise.all([
+      getTrafficImpact(mapCenter[0], mapCenter[1], selectedRoute).catch(() => null),
+      getConstructionImpact(mapCenter[0], mapCenter[1]).catch(() => null),
+    ]).then(([nextTrafficImpact, nextConstructionImpact]) => {
+      if (cancelled) return;
+      setTrafficImpact(nextTrafficImpact);
+      setConstructionImpact(nextConstructionImpact);
+    });
+
+    return () => { cancelled = true; };
+  }, [mapCenter[0], mapCenter[1], selectedRoute]);
+
   const routes = prediction?.routes ?? [];
   const dirs = prediction?.dirs ?? ["Westbound", "Eastbound"];
   const weatherDelay = weather ? estimateWeatherDelay(weather) : prediction?.offsets.weather;
+  const trafficDelay = trafficImpact?.trafficDelayMin ?? prediction?.offsets.traffic;
+  const accidentDelay = trafficImpact?.accidentDelayMin ?? prediction?.offsets.accidents;
+  const constructionDelay = constructionImpact?.constructionDelayMin ?? trafficImpact?.constructionDelayMin ?? prediction?.offsets.construction;
   const displayedPrediction = prediction && weatherDelay !== undefined
     ? {
       ...prediction,
       offsets: {
         ...prediction.offsets,
         weather: weatherDelay,
+        traffic: trafficDelay ?? prediction.offsets.traffic,
+        accidents: accidentDelay ?? prediction.offsets.accidents,
+        construction: constructionDelay ?? prediction.offsets.construction,
       },
     }
     : prediction;
@@ -626,8 +668,9 @@ function BusReport({ route, dir, stopId, mapCenter, onClose }: BusReportProps) {
       apiBusReport(stopId, route, dir),
       getCurrentWeather(mapCenter[0], mapCenter[1]).catch(() => null),
       getTrafficImpact(mapCenter[0], mapCenter[1], route).catch(() => null),
+      getConstructionImpact(mapCenter[0], mapCenter[1]).catch(() => null),
     ])
-      .then(([report, currentWeather, trafficImpact]) => {
+      .then(([report, currentWeather, trafficImpact, constructionImpact]) => {
         if (cancelled) return;
 
         const nextReport: BusReportData = {
@@ -657,6 +700,13 @@ function BusReport({ route, dir, stopId, mapCenter, onClose }: BusReportProps) {
           nextReport.factors.construction = {
             value: trafficImpact.constructionDelayMin,
             description: describeTrafficDelay(trafficImpact, "construction"),
+          };
+        }
+
+        if (constructionImpact) {
+          nextReport.factors.construction = {
+            value: constructionImpact.constructionDelayMin,
+            description: describeConstructionDelay(constructionImpact),
           };
         }
 
@@ -901,7 +951,7 @@ function NavScreen({ destId, mapCenter, userPos, locationStatus, onClose }: NavS
   }, [destId, userPos]);
 
   return (
-    <div className="bg-white relative h-full min-h-screen">
+    <div className="bg-white relative h-full min-h-[844px]">
       {/* Full-screen map */}
       <div className="absolute inset-0">
         <LeafletMap center={mapCenter} zoom={16} userPos={userPos} locationStatus={locationStatus} className="absolute inset-0" />
@@ -1117,6 +1167,28 @@ type AppScreen =
   | { id: "destNav"; destId: string }
   | { id: "navigation"; destId: string };
 
+function useCanvasScale() {
+  const [scale, setScale] = useState(1);
+
+  useEffect(() => {
+    const updateScale = () => {
+      const widthScale = window.innerWidth / DESIGN_WIDTH;
+      const heightScale = window.innerHeight / DESIGN_HEIGHT;
+      const desktopWidthScale = window.innerWidth >= 900
+        ? (window.innerWidth * 0.34) / DESIGN_WIDTH
+        : widthScale;
+      const nextScale = Math.min(desktopWidthScale, heightScale, 1.45);
+      setScale(nextScale);
+    };
+
+    updateScale();
+    window.addEventListener("resize", updateScale);
+    return () => window.removeEventListener("resize", updateScale);
+  }, []);
+
+  return scale;
+}
+
 export default function App() {
   const [screen, setScreen] = useState<AppScreen>({ id: "loading" });
   const [searching, setSearching] = useState(false);
@@ -1124,6 +1196,7 @@ export default function App() {
   const [userPos, setUserPos] = useState<[number, number] | null>(null);
   const [locationStatus, setLocationStatus] = useState<LocationStatus>("locating");
   const [homeStopId, setHomeStopId] = useState("college-yonge");
+  const canvasScale = useCanvasScale();
 
   useEffect(() => {
     if (!navigator.geolocation) {
@@ -1230,8 +1303,21 @@ export default function App() {
   return (
     <>
     <AiChatbot />
-    <div className="min-h-screen bg-gray-100 flex items-start justify-center">
-      <div className="w-full max-w-[390px] min-h-screen bg-white relative overflow-x-hidden">
+    <div className="min-h-screen bg-gray-100 flex items-start justify-center overflow-auto py-1">
+      <div
+        className="relative shrink-0"
+        style={{
+          width: DESIGN_WIDTH * canvasScale,
+          minHeight: DESIGN_HEIGHT * canvasScale,
+        }}
+      >
+      <div
+        className="w-[390px] min-h-[844px] bg-white relative overflow-x-hidden origin-top"
+        style={{
+          transform: `scale(${canvasScale})`,
+          transformOrigin: "top center",
+        }}
+      >
         {searching ? (
           <SearchOverlay
             query={query}
@@ -1241,7 +1327,7 @@ export default function App() {
             onSelectDest={handleSelectDest}
           />
         ) : screen.id === "loading" ? (
-          <div className="min-h-screen bg-white flex items-center justify-center">
+          <div className="min-h-[844px] bg-white flex items-center justify-center">
             <div className="flex flex-col items-center gap-3">
               <Skeleton className="size-[56px] rounded-[18px]" />
               <Skeleton className="h-4 w-40" />
@@ -1287,6 +1373,7 @@ export default function App() {
             onClose={handleCloseNavigation}
           />
         ) : null}
+      </div>
       </div>
     </div>
     </>
