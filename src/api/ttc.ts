@@ -243,6 +243,8 @@ export function getNavigationRoute(
 }
 
 function findRouteInText(input: string): number | undefined {
+  if (isAddressLikeDestination(input)) return undefined;
+
   const route = input.match(/\b([1-9]\d{1,2})\b/);
   return route ? Number(route[1]) : undefined;
 }
@@ -282,6 +284,7 @@ function extractDestinationQuery(input: string): string | undefined {
 function isBareDestinationCandidate(input: string): boolean {
   const cleaned = input.trim();
   if (cleaned.length < 3) return false;
+  if (isPendingStopClarificationInput(cleaned)) return false;
   if (isWeatherQuestion(cleaned) || isTrafficQuestion(cleaned) || isDelayQuestion(cleaned) || isCrowdingQuestion(cleaned)) return false;
   if (isLocationQuestion(cleaned) || isRouteTerminalQuestion(cleaned) || isTransitArrivalRequest(cleaned)) return false;
 
@@ -290,6 +293,16 @@ function isBareDestinationCandidate(input: string): boolean {
 
 function isAddressLikeDestination(input: string): boolean {
   return /\b\d+\s+[\w\s'.-]+(?:street|st|road|rd|avenue|ave|boulevard|blvd|drive|dr|court|ct|crescent|cres|lane|ln|way|parkway|pkwy)\b/i.test(input);
+}
+
+function isPendingStopClarificationInput(input: string): boolean {
+  return /\b(?:at|near|by)\b/i.test(input) && !/\b(?:go|travel|get|navigate|route|directions?|trip|destination)\s+to\b/i.test(input);
+}
+
+function getClarificationStopQuery(input: string): string {
+  const cleaned = input.trim();
+  if (/\b\w+\s+at\s+\w+\b/i.test(cleaned)) return cleaned;
+  return extractStopQuery(cleaned) ?? cleaned;
 }
 
 function isTransitArrivalRequest(input: string): boolean {
@@ -1027,7 +1040,71 @@ async function answerUnknownRouteClarification(
     };
   }
 
+  const replacementRoute = findRouteInText(input);
+  if (replacementRoute) {
+    return {
+      matchedIntent: "help",
+      confidence: 78,
+      context: {
+        ...context,
+        routeId: replacementRoute,
+        pendingUnknownRoute: undefined,
+        pendingSuggestedRoute: undefined,
+        pendingRouteClarification: replacementRoute,
+        lastIntent: "help",
+      },
+      text: context.stopId
+        ? `Got it, route ${replacementRoute}. Which stop should I check?`
+        : `Got it, route ${replacementRoute}. Which stop should I check for that route?`,
+    };
+  }
+
+  if (isPendingStopClarificationInput(input) || /\b(?:stop|station)\b/i.test(input)) {
+    const stopQuery = getClarificationStopQuery(input);
+    const stop = (await searchStops(stopQuery))[0];
+    const stopText = stop ? `I found ${stop.name.replace(/[.]+$/, "")}. ` : "";
+
+    return {
+      matchedIntent: "help",
+      confidence: stop ? 80 : 72,
+      context: {
+        ...context,
+        stopId: stop?.id,
+        pendingUnknownRoute: undefined,
+        pendingSuggestedRoute: undefined,
+        lastIntent: "help",
+      },
+      text: `${stopText}Which route number do you want arrival times for?`,
+    };
+  }
+
   return null;
+}
+
+async function answerStopClarificationInput(
+  input: string,
+  context: TransitAssistantContext,
+): Promise<TransitAssistantAnswer | null> {
+  if (context.lastIntent !== "help") return null;
+  if (!(isPendingStopClarificationInput(input) || /\b(?:stop|station)\b/i.test(input))) return null;
+  if (findRouteInText(input)) return null;
+
+  const stopQuery = getClarificationStopQuery(input);
+  const stop = (await searchStops(stopQuery))[0];
+
+  return {
+    matchedIntent: "help",
+    confidence: stop ? 80 : 72,
+    context: {
+      ...context,
+      stopId: stop?.id,
+      destinationId: undefined,
+      lastIntent: "help",
+    },
+    text: stop
+      ? `I found ${stop.name.replace(/[.]+$/, "")}. Which route number do you want arrival times for?`
+      : `I can use ${stopQuery} as the stop. Which route number do you want arrival times for?`,
+  };
 }
 
 async function answerLocationQuestion(
@@ -1206,6 +1283,9 @@ export async function askTransitAssistant(
 
   const clarificationAnswer = answerRouteClarification(q, context);
   if (clarificationAnswer) return clarificationAnswer;
+
+  const stopClarificationAnswer = await answerStopClarificationInput(q, context);
+  if (stopClarificationAnswer) return stopClarificationAnswer;
 
   if (isLocationQuestion(q)) {
     return answerLocationQuestion(context);
