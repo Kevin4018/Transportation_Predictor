@@ -151,11 +151,27 @@ export interface TransitAssistantContext {
   lastIntent?: TransitAssistantAnswer["matchedIntent"];
 }
 
+export type TransitAssistantIntent =
+  | "eta"
+  | "delay"
+  | "weather"
+  | "traffic"
+  | "crowding"
+  | "navigation"
+  | "help"
+  | "out-of-scope";
+
 export interface TransitAssistantAnswer {
   text: string;
-  matchedIntent: "eta" | "delay" | "weather" | "traffic" | "crowding" | "navigation" | "help" | "out-of-scope";
+  matchedIntent: TransitAssistantIntent;
   confidence: number;
   context?: TransitAssistantContext;
+}
+
+interface TransitAssistantIntentResult {
+  intent: TransitAssistantIntent;
+  confidence: number;
+  reason?: string;
 }
 
 const ROUTE_TERMINALS: Record<number, { label: string; terminals: string[]; notes?: string }> = {
@@ -240,6 +256,22 @@ export function getNavigationRoute(
       mode,
     },
   });
+}
+
+async function classifyTransitAssistantIntent(
+  input: string,
+  context: TransitAssistantContext,
+): Promise<TransitAssistantIntentResult | undefined> {
+  try {
+    const result = await apiRequest<TransitAssistantIntentResult>("/api/ttc/assistant/intent", {
+      method: "POST",
+      body: { input, context },
+    });
+
+    return result.confidence >= 60 ? result : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function findRouteInText(input: string): number | undefined {
@@ -1331,12 +1363,14 @@ export async function askTransitAssistant(
     return answerLocationQuestion(context);
   }
 
+  const classifiedIntent = await classifyTransitAssistantIntent(q, context);
+  const llmIntent = classifiedIntent?.intent;
   const followUp = isGenericFollowUp(q) && hasAssistantContext(context);
-  const wantsWeather = isWeatherQuestion(q) || (context.lastIntent === "weather" && (isTimeFollowUp(q) || followUp));
-  const wantsTraffic = isTrafficQuestion(q) || (context.lastIntent === "traffic" && (isTimeFollowUp(q) || followUp));
-  const wantsDelay = isDelayQuestion(q) || (context.lastIntent === "delay" && followUp);
-  const wantsCrowding = isCrowdingQuestion(q) || (context.lastIntent === "crowding" && followUp);
-  const wantsEta = isEtaQuestion(q) || (hasRouteContext(context) && (context.lastIntent === "eta" || followUp));
+  const wantsWeather = llmIntent ? llmIntent === "weather" : isWeatherQuestion(q) || (context.lastIntent === "weather" && (isTimeFollowUp(q) || followUp));
+  const wantsTraffic = llmIntent ? llmIntent === "traffic" : isTrafficQuestion(q) || (context.lastIntent === "traffic" && (isTimeFollowUp(q) || followUp));
+  const wantsDelay = llmIntent ? llmIntent === "delay" : isDelayQuestion(q) || (context.lastIntent === "delay" && followUp);
+  const wantsCrowding = llmIntent ? llmIntent === "crowding" : isCrowdingQuestion(q) || (context.lastIntent === "crowding" && followUp);
+  const wantsEta = llmIntent ? llmIntent === "eta" : isEtaQuestion(q) || (hasRouteContext(context) && (context.lastIntent === "eta" || followUp));
 
   const terminalAnswer = answerRouteTerminalQuestion(q, context);
   if (terminalAnswer) return terminalAnswer;
@@ -1349,13 +1383,17 @@ export async function askTransitAssistant(
     return answerTrafficQuestion(q, context);
   }
 
-  const destinationAnswer = await answerDestinationQuestion(q, context);
-  if (destinationAnswer) return destinationAnswer;
+  if (!llmIntent || llmIntent === "navigation") {
+    const destinationAnswer = await answerDestinationQuestion(q, context);
+    if (destinationAnswer) return destinationAnswer;
+  }
 
   const stopContextAnswer = await answerStopContextQuestion(q, context);
   if (stopContextAnswer) return stopContextAnswer;
 
-  const isTransitQuestion = /bus|ttc|route|stop|station|eta|arriv|delay|late|weather|traffic|crowd|busy|navigate|direction|trip|destination|terminal|terminus|last stop|final stop|walk|go to|get to|take me|east|west|north|south|\b\d{3}\b/i.test(q) || followUp;
+  const isTransitQuestion = llmIntent
+    ? llmIntent !== "out-of-scope"
+    : /bus|ttc|route|stop|station|eta|arriv|delay|late|weather|traffic|crowd|busy|navigate|direction|trip|destination|terminal|terminus|last stop|final stop|walk|go to|get to|take me|east|west|north|south|\b\d{3}\b/i.test(q) || followUp;
   if (!isTransitQuestion) {
     return {
       matchedIntent: "out-of-scope",
