@@ -74,6 +74,17 @@ function LeafletMap({ center, zoom, userPos, locationStatus, stops, routeLine, d
       onMoveEnd?.(next);
     });
 
+    map.on("zoomstart", () => {
+      skipNextMoveEndRef.current = true;
+    });
+
+    map.on("zoomend", () => {
+      skipNextMoveEndRef.current = false;
+      window.requestAnimationFrame(() => map.invalidateSize({ animate: false }));
+    });
+
+    window.requestAnimationFrame(() => map.invalidateSize({ animate: false }));
+
     // Stop markers render in a separate effect so async nearby stops can update.
     if (false && stops) {
       stops.forEach(s => {
