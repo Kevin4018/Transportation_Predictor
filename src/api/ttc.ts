@@ -140,6 +140,8 @@ export interface TransitAssistantContext {
   routeId?: number;
   direction?: string;
   destinationId?: string;
+  originPos?: [number, number];
+  originLabel?: string;
   navigationEtaMin?: number;
   navigationArrivalTime?: string;
   pendingRouteClarification?: number;
@@ -264,8 +266,9 @@ function isNo(input: string): boolean {
 function extractDestinationQuery(input: string): string | undefined {
   const cleaned = input.trim().replace(/[?.!]+$/, "");
   const patterns = [
-    /\b(?:i\s+want\s+to\s+go\s+to|i\s+need\s+to\s+go\s+to|take\s+me\s+to|go\s+to|get\s+me\s+to|how\s+do\s+i\s+get\s+to|directions?\s+to|navigate\s+to)\s+(.+)$/i,
-    /\b(?:trip|route|transit)\s+to\s+(.+)$/i,
+    /\b(?:i\s+(?:want|need|would\s+like)\s+to\s+(?:go|travel|get)\s+to|can\s+you\s+(?:take|get|route|navigate)\s+me\s+to|take\s+me\s+to|get\s+me\s+to|route\s+me\s+to|navigate\s+me\s+to|go\s+to|travel\s+to|head\s+to|visit)\s+(.+)$/i,
+    /\b(?:how\s+(?:do|can|should)\s+i\s+(?:get|go|travel)\s+to|how\s+to\s+(?:get|go|travel)\s+to|directions?\s+to|navigate\s+to|route\s+to|trip\s+to|transit\s+to|plan\s+(?:a\s+)?trip\s+to)\s+(.+)$/i,
+    /\b(?:what(?:'s|\s+is)?\s+the\s+(?:best\s+)?(?:route|way|trip)\s+to|give\s+me\s+(?:a\s+)?(?:route|trip|directions?)\s+to)\s+(.+)$/i,
   ];
 
   for (const pattern of patterns) {
@@ -276,6 +279,16 @@ function extractDestinationQuery(input: string): string | undefined {
   return undefined;
 }
 
+function isBareDestinationCandidate(input: string): boolean {
+  const cleaned = input.trim();
+  if (cleaned.length < 3) return false;
+  if (findRouteInText(cleaned)) return false;
+  if (isWeatherQuestion(cleaned) || isTrafficQuestion(cleaned) || isDelayQuestion(cleaned) || isCrowdingQuestion(cleaned)) return false;
+  if (isLocationQuestion(cleaned) || isRouteTerminalQuestion(cleaned) || isEtaQuestion(cleaned)) return false;
+
+  return /[a-z]/i.test(cleaned);
+}
+
 function isRouteNumberOnlyDestination(query: string | undefined): number | undefined {
   const routeId = query?.trim().match(/^([1-9]\d{1,2})$/)?.[1];
   return routeId ? Number(routeId) : undefined;
@@ -283,11 +296,31 @@ function isRouteNumberOnlyDestination(query: string | undefined): number | undef
 
 async function routeHasStops(routeId: number): Promise<boolean> {
   const stops = await searchStops(String(routeId));
-  return stops.some(stop => stop.routes.split(",").map(route => Number(route.trim())).includes(routeId));
+  return stops.some(stop => stopServesRoute(stop, routeId));
 }
 
 function isRouteNumberOnlyInput(input: string): boolean {
   return /^([1-9]\d{1,2})$/.test(input.trim());
+}
+
+function getStopRoutes(stop: StopResult): number[] {
+  return stop.routes.split(",").map(route => Number(route.trim())).filter(Number.isFinite);
+}
+
+function stopServesRoute(stop: StopResult, routeId: number): boolean {
+  return getStopRoutes(stop).includes(routeId);
+}
+
+function normalizeStopText(input: string): string {
+  return input.toLowerCase().replace(/\bbus stop:\s*/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+async function findRouteStopByQuery(routeId: number, stopQuery: string): Promise<StopResult | undefined> {
+  const normalizedQuery = normalizeStopText(stopQuery);
+  if (!normalizedQuery) return undefined;
+
+  const routeStops = await searchStops(String(routeId));
+  return routeStops.find(stop => stopServesRoute(stop, routeId) && normalizeStopText(stop.name).includes(normalizedQuery));
 }
 
 function extractStopQuery(input: string): string | undefined {
@@ -549,6 +582,17 @@ function buildDestinationOptionsAnswer(
   route: NavigationRoute,
   context: TransitAssistantContext,
 ): { text: string; etaMin: number; arrivalTime: string } {
+  if (route.available === false) {
+    return {
+      etaMin: 0,
+      arrivalTime: "",
+      text: buildNavigationTripText(route, {
+        etaMin: 0,
+        arrivalTime: "",
+      }).join(" "),
+    };
+  }
+
   const baseEta = context.navigationEtaMin ?? route.etaMin;
   const baseArrival = parseTransitClockMinutes(context.navigationArrivalTime ?? route.arrivalTime);
   const optionGaps = [0, ...route.alsoAt.map(parseDurationMinutes)]
@@ -669,6 +713,59 @@ function describeTrafficLevel(delayMin: number): string {
   return "light";
 }
 
+function formatLegMode(mode: NavigationLeg["mode"]): string {
+  if (mode === "BUS") return "bus";
+  if (mode === "STREETCAR") return "streetcar";
+  if (mode === "SUBWAY") return "subway";
+  if (mode === "WALK") return "walk";
+  if (mode === "CAR") return "drive";
+  if (mode === "BICYCLE") return "bike";
+  if (mode === "TRANSIT") return "transit";
+  return "travel";
+}
+
+function describeNavigationLeg(leg: NavigationLeg): string {
+  const mode = formatLegMode(leg.mode);
+  const routeText = leg.routeLabel ? ` ${leg.routeLabel}` : "";
+  const headsignText = leg.headsign ? ` toward ${leg.headsign}` : "";
+  const timeText = leg.startTime && leg.endTime ? ` (${leg.startTime}-${leg.endTime})` : "";
+  const distanceText = leg.distanceMeters && leg.mode === "WALK" ? `, ${leg.distanceMeters} m` : "";
+
+  return `${mode}${routeText}${headsignText} from ${leg.fromName} to ${leg.toName} for ${leg.durationMin} min${distanceText}${timeText}`;
+}
+
+function buildNavigationTripText(route: NavigationRoute, timing: ReturnType<typeof calculateDestinationTiming>): string[] {
+  if (route.available === false) {
+    return [
+      route.message ?? `I could not find a route to ${route.destName} right now.`,
+      "Try another travel mode, a more specific address, or a nearby landmark.",
+    ];
+  }
+
+  if (route.legs?.length) {
+    const totalTime = route.durationMin ? `${route.durationMin} min` : `${timing.etaMin} min`;
+    const legText = route.legs.slice(0, 5).map(describeNavigationLeg).join("; ");
+    return [
+      `To get to ${route.destName}, the trip is about ${totalTime}.`,
+      `Steps: ${legText}.`,
+      route.arrivalTime ? `Estimated arrival: ${route.arrivalTime}.` : "",
+    ].filter(Boolean);
+  }
+
+  const stopName = route.busStop.replace(/[.]+$/, "");
+  const transport = route.routeLabel.match(/^\d+/) ? "TTC transit" : "transit";
+  const intro = timing.timingNote
+    ? `${timing.timingNote} take ${transport} route ${route.routeLabel} to get to ${route.destName}.`
+    : `To get to ${route.destName}, take ${transport} route ${route.routeLabel}.`;
+
+  return [
+    intro,
+    `Walk ${route.walkMin} min (${route.walkMeters} m) to ${stopName} station/stop.`,
+    `The vehicle is estimated in ${timing.etaMin} min, then ride ${route.totalStops} stops.`,
+    `Estimated arrival: ${timing.arrivalTime}.`,
+  ];
+}
+
 async function answerWeatherQuestion(input: string, context: TransitAssistantContext): Promise<TransitAssistantAnswer> {
   const targetTime = parseAssistantTargetTime(input, getTimeBase(input, context));
 
@@ -758,7 +855,7 @@ async function answerDestinationQuestion(
   input: string,
   context: TransitAssistantContext,
 ): Promise<TransitAssistantAnswer | null> {
-  const destinationQuery = extractDestinationQuery(input);
+  const destinationQuery = extractDestinationQuery(input) ?? (isBareDestinationCandidate(input) ? input.trim() : undefined);
   if (!destinationQuery && !(context.destinationId && isDestinationFollowUp(input))) return null;
 
   const routeClarification = isRouteNumberOnlyDestination(destinationQuery);
@@ -785,9 +882,7 @@ async function answerDestinationQuestion(
     };
   }
 
-  const route = await getNavigationRoute("current-location", destinationId);
-  const stopName = route.busStop.replace(/[.]+$/, "");
-  const transport = route.routeLabel.match(/^\d+/) ? "TTC transit" : "transit";
+  const route = await getNavigationRoute(context.originLabel ?? "current-location", destinationId, context.originPos);
   if (isOptionsFollowUp(input)) {
     const optionsAnswer = buildDestinationOptionsAnswer(route, context);
     return {
@@ -813,20 +908,12 @@ async function answerDestinationQuestion(
     lastTargetTimeIso: timing.targetTime?.toISOString() ?? context.lastTargetTimeIso,
     lastIntent: "navigation" as const,
   };
-  const intro = timing.timingNote
-    ? `${timing.timingNote} take ${transport} route ${route.routeLabel} to get to ${route.destName}.`
-    : `To get to ${route.destName}, take ${transport} route ${route.routeLabel}.`;
 
   return {
     matchedIntent: "navigation",
-    confidence: timing.timingNote ? 78 : 86,
+    confidence: route.available === false ? 58 : timing.timingNote ? 78 : 86,
     context: nextContext,
-    text: [
-      intro,
-      `Walk ${route.walkMin} min (${route.walkMeters} m) to ${stopName} station/stop.`,
-      `The vehicle is estimated in ${timing.etaMin} min, then ride ${route.totalStops} stops.`,
-      `Estimated arrival: ${timing.arrivalTime}.`,
-    ].join(" "),
+    text: buildNavigationTripText(route, timing).join(" "),
   };
 }
 
@@ -1038,7 +1125,8 @@ async function pickAssistantPrediction(
 
     if (stopQuery) {
       const routeStops = await searchStops(stopQuery);
-      const matchingStop = routeStops.find(stop => stop.routes.split(",").map(route => Number(route.trim())).includes(routeId));
+      const matchingStop = routeStops.find(stop => stopServesRoute(stop, routeId))
+        ?? await findRouteStopByQuery(routeId, stopQuery);
       if (matchingStop) {
         stopId = matchingStop.id;
         meta = await getStopMeta(stopId);

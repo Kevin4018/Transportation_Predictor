@@ -787,13 +787,14 @@ export const searchStops = (query: string): StopResult[] => {
         JOIN stop_routes ON stop_routes.stop_id = stops.stop_id
         WHERE (? = ''
           OR lower(stops.stop_name) LIKE ?
-          OR lower(stops.stop_id) LIKE ?)
+          OR lower(stops.stop_id) LIKE ?
+          OR lower(stop_routes.route_name) LIKE ?)
           AND stop_routes.service_period = ?
         GROUP BY stops.stop_name
         ORDER BY stop_name
         LIMIT 8
       `)
-      .all(q, `%${q}%`, `%${q}%`, servicePeriodParam()) as Array<GtfsStop & { route_names: string }>;
+      .all(q, `%${q}%`, `%${q}%`, `%${q}%`, servicePeriodParam()) as Array<GtfsStop & { route_names: string }>;
 
     return rows.map((stop) => ({
       source: "gtfs",
@@ -1552,7 +1553,7 @@ const getNavigationUnavailableRoute = (
 ): NavigationRoute => ({
   source: "otp",
   available: false,
-  message: "Navigation unavailable.",
+  message: `I found ${dest.name}${dest.address ? ` at ${dest.address}` : ""}, but live ${modeLabel(mode).toLowerCase()} routing is unavailable right now.`,
   originCoordinates,
   destinationCoordinates: { lat: dest.lat, lng: dest.lng },
   destName: dest.name,
@@ -1589,10 +1590,39 @@ export const getNavigationRoute = (
   return Promise.resolve(getMockNavigationRoute(dest, originCoordinates));
 };
 
+const isPlaceholderDestination = (dest: DestinationRecord) =>
+  dest.routeLabel === "Transit" &&
+  dest.walkMin === 0 &&
+  dest.walkMeters === 0 &&
+  dest.etaMin === 0 &&
+  !dest.arrivalTime &&
+  dest.totalStops === 0;
+
 const getMockNavigationRoute = (
   dest: DestinationRecord,
   originCoordinates?: { lat: number; lng: number },
 ): NavigationRoute => {
+  if (isPlaceholderDestination(dest)) {
+    return {
+      source: "mock",
+      available: false,
+      message: `I found ${dest.name}${dest.address ? ` at ${dest.address}` : ""}, but I need your current location and live routing to calculate the trip.`,
+      ...(originCoordinates ? { originCoordinates } : {}),
+      destinationCoordinates: { lat: dest.lat, lng: dest.lng },
+      destName: dest.name,
+      destAddress: dest.address,
+      walkMin: 0,
+      walkMeters: 0,
+      busStop: "",
+      routeLabel: "",
+      etaMin: 0,
+      departureTime: "",
+      arrivalTime: "",
+      totalStops: 0,
+      alsoAt: [],
+      legs: [],
+    };
+  }
 
   return {
     source: "mock",
