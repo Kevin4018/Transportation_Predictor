@@ -12,10 +12,13 @@ interface LeafletMapProps {
   center: [number, number];
   zoom: number;
   userPos: [number, number] | null;
+  originPos?: [number, number] | null;
+  originLabel?: string;
   locationStatus?: LocationStatus;
   stops?: NearbyStop[];
   routeLine?: [number, number][];
   destinationPos?: [number, number];
+  fitToRoute?: boolean;
   transitMarkers?: Array<{
     pos: [number, number];
     mode: "BUS" | "STREETCAR" | "SUBWAY" | "TRANSIT";
@@ -29,10 +32,11 @@ interface LeafletMapProps {
 }
 
 /** Pure-DOM Leaflet map — no react-leaflet context, works with any React version */
-function LeafletMap({ center, zoom, userPos, locationStatus, stops, routeLine, destinationPos, transitMarkers, selectedStopId, onSelectStop, onMoveEnd, onZoomEnd, className }: LeafletMapProps) {
+function LeafletMap({ center, zoom, userPos, originPos, originLabel, locationStatus, stops, routeLine, destinationPos, fitToRoute, transitMarkers, selectedStopId, onSelectStop, onMoveEnd, onZoomEnd, className }: LeafletMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
   const userMarkerRef = useRef<L.Marker | null>(null);
+  const originMarkerRef = useRef<L.Marker | null>(null);
   const stopMarkersRef = useRef<L.Marker[]>([]);
   const routeLineRef = useRef<L.Polyline | null>(null);
   const destinationMarkerRef = useRef<L.Marker | null>(null);
@@ -147,6 +151,31 @@ function LeafletMap({ center, zoom, userPos, locationStatus, stops, routeLine, d
     }
   }, [userPos]);
 
+  // Selected trip origin marker
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    originMarkerRef.current?.remove();
+    originMarkerRef.current = null;
+
+    if (originPos) {
+      const icon = L.divIcon({
+        className: "",
+        html: `<div style="width:34px;height:34px;display:flex;align-items:center;justify-content:center;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.35))"><svg width="30" height="34" viewBox="0 0 18 21" aria-hidden="true"><path d="${P.pinFill}" fill="#007AFF"/><circle cx="8.7" cy="7.2" r="3.1" fill="white"/></svg></div>`,
+        iconSize: [34, 34],
+        iconAnchor: [17, 31],
+      });
+      originMarkerRef.current = L.marker(originPos, { icon }).addTo(map);
+      originMarkerRef.current.bindTooltip(originLabel ?? "Origin", { permanent: false, direction: "top", offset: [0, -28] });
+    }
+
+    return () => {
+      originMarkerRef.current?.remove();
+      originMarkerRef.current = null;
+    };
+  }, [originLabel, originPos?.[0], originPos?.[1]]);
+
   // Stop markers update after nearby stops load or the map center changes.
   useEffect(() => {
     const map = mapRef.current;
@@ -226,6 +255,52 @@ function LeafletMap({ center, zoom, userPos, locationStatus, stops, routeLine, d
       destinationMarkerRef.current = null;
     };
   }, [destinationPos]);
+
+  // Keep the full trip visible once origin, destination, or route geometry is known.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !fitToRoute) return;
+
+    const points = [
+      ...(originPos ? [originPos] : []),
+      ...(destinationPos ? [destinationPos] : []),
+      ...(routeLine ?? []),
+    ].filter((point): point is [number, number] =>
+      Array.isArray(point) &&
+      Number.isFinite(point[0]) &&
+      Number.isFinite(point[1])
+    );
+
+    if (points.length === 0) return;
+
+    skipNextMoveEndRef.current = true;
+    window.requestAnimationFrame(() => {
+      map.invalidateSize({ animate: false });
+      if (points.length === 1) {
+        lastSentCenterRef.current = points[0];
+        map.setView(points[0], Math.max(14, zoom), { animate: false });
+        return;
+      }
+
+      const bounds = L.latLngBounds(points);
+      const nextCenter = bounds.getCenter();
+      lastSentCenterRef.current = [nextCenter.lat, nextCenter.lng];
+      map.fitBounds(bounds.pad(0.18), {
+        animate: false,
+        paddingTopLeft: [18, 18],
+        paddingBottomRight: [18, 18],
+        maxZoom: 16,
+      });
+    });
+  }, [
+    fitToRoute,
+    originPos?.[0],
+    originPos?.[1],
+    destinationPos?.[0],
+    destinationPos?.[1],
+    routeLine?.map(point => `${point[0]},${point[1]}`).join("|"),
+    zoom,
+  ]);
 
   // Route transit stop/station markers
   useEffect(() => {
@@ -1398,7 +1473,18 @@ function DestNavScreen({ destId, mapCenter, originPos, originLabel, userPos, loc
       {/* Map */}
       <div className="px-[25px] mt-[10px] shrink-0">
         <div className="rounded-[8px] overflow-hidden h-[200px] w-full">
-          <LeafletMap center={mapCenter} zoom={14} userPos={userPos} locationStatus={locationStatus} routeLine={routeLine} destinationPos={destinationPos} transitMarkers={transitMarkers} />
+          <LeafletMap
+            center={destinationPos ?? originPos ?? mapCenter}
+            zoom={14}
+            userPos={userPos}
+            originPos={originPos}
+            originLabel={originLabel}
+            locationStatus={locationStatus}
+            routeLine={routeLine}
+            destinationPos={destinationPos}
+            fitToRoute
+            transitMarkers={transitMarkers}
+          />
         </div>
       </div>
 
@@ -1551,7 +1637,19 @@ function NavScreen({ destId, mode, mapCenter, originPos, originLabel, userPos, l
     <div className="bg-white relative h-full min-h-[844px]">
       {/* Full-screen map */}
       <div className="absolute inset-0">
-        <LeafletMap center={mapCenter} zoom={16} userPos={userPos} locationStatus={locationStatus} routeLine={routeLine} destinationPos={destinationPos} transitMarkers={transitMarkers} className="absolute inset-0" />
+        <LeafletMap
+          center={destinationPos ?? originPos ?? mapCenter}
+          zoom={16}
+          userPos={userPos}
+          originPos={originPos}
+          originLabel={originLabel}
+          locationStatus={locationStatus}
+          routeLine={routeLine}
+          destinationPos={destinationPos}
+          fitToRoute
+          transitMarkers={transitMarkers}
+          className="absolute inset-0"
+        />
       </div>
 
       {/* Close button */}
