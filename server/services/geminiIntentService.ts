@@ -3,6 +3,8 @@ export type TransitAssistantIntent =
   | "delay"
   | "weather"
   | "traffic"
+  | "events"
+  | "holidays"
   | "crowding"
   | "navigation"
   | "help"
@@ -10,6 +12,21 @@ export type TransitAssistantIntent =
 
 export interface TransitAssistantIntentResult {
   intent: TransitAssistantIntent;
+  confidence: number;
+  reason?: string;
+}
+
+export interface TransitAssistantAnswerVerificationRequest {
+  input: string;
+  draftAnswer: string;
+  matchedIntent: TransitAssistantIntent;
+  confidence: number;
+  context?: TransitAssistantIntentContext;
+}
+
+export interface TransitAssistantAnswerVerificationResult {
+  isCorrect: boolean;
+  answer: string;
   confidence: number;
   reason?: string;
 }
@@ -27,6 +44,8 @@ const VALID_INTENTS = new Set<TransitAssistantIntent>([
   "delay",
   "weather",
   "traffic",
+  "events",
+  "holidays",
   "crowding",
   "navigation",
   "help",
@@ -83,10 +102,31 @@ function normalizeIntentResult(value: unknown): TransitAssistantIntentResult {
   };
 }
 
-export async function classifyTransitAssistantIntent(
-  input: string,
-  context: TransitAssistantIntentContext = {},
-): Promise<TransitAssistantIntentResult> {
+function normalizeAnswerVerificationResult(
+  value: unknown,
+  fallbackAnswer: string,
+): TransitAssistantAnswerVerificationResult {
+  if (!value || typeof value !== "object") {
+    throw new Error("Gemini answer verification response was not an object");
+  }
+
+  const record = value as Record<string, unknown>;
+  const confidence = Number(record.confidence);
+  const answer = typeof record.answer === "string" && record.answer.trim()
+    ? record.answer.trim()
+    : fallbackAnswer;
+
+  return {
+    isCorrect: record.isCorrect === true,
+    answer,
+    confidence: Number.isFinite(confidence)
+      ? Math.max(0, Math.min(100, Math.round(confidence)))
+      : 60,
+    reason: typeof record.reason === "string" ? record.reason : undefined,
+  };
+}
+
+async function requestGeminiJson(prompt: string): Promise<unknown> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error("GEMINI_API_KEY is not configured");
@@ -97,23 +137,6 @@ export async function classifyTransitAssistantIntent(
     `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
   );
   url.searchParams.set("key", apiKey);
-
-  const prompt = [
-    "Classify this TTC transit assistant user message into exactly one intent.",
-    "Return only JSON with this schema: {\"intent\":\"eta|delay|weather|traffic|crowding|navigation|help|out-of-scope\",\"confidence\":0-100,\"reason\":\"short\"}.",
-    "Intent meanings:",
-    "- eta: arrival time, next bus/streetcar, route/stop timing.",
-    "- delay: lateness, causes, accidents, construction, why slow.",
-    "- weather: weather or weather impact.",
-    "- traffic: road traffic or congestion impact.",
-    "- crowding: passenger load, seats, packed vehicles.",
-    "- navigation: directions, trip planning, how to get to a destination.",
-    "- help: transit-related but missing needed details or clarification.",
-    "- out-of-scope: not about TTC transit, commuting, routing, stops, traffic, weather, or crowding.",
-    "Use context for follow-ups like 'what about now' or 'why'.",
-    `Context: ${JSON.stringify(context)}`,
-    `User message: ${input}`,
-  ].join("\n");
 
   const response = await fetch(url, {
     method: "POST",
@@ -136,16 +159,7 @@ export async function classifyTransitAssistantIntent(
 
   if (!response.ok) {
     const details = await response.text();
-    if (isIntentDebugEnabled()) {
-      console.log("[milkbot intent error]", {
-        input,
-        context,
-        model,
-        status: response.status,
-        details,
-      });
-    }
-    throw new Error(`Gemini intent request failed: ${response.status} ${details}`);
+    throw new Error(`Gemini request failed: ${response.status} ${details}`);
   }
 
   const data = (await response.json()) as GeminiGenerateContentResponse;
@@ -155,21 +169,106 @@ export async function classifyTransitAssistantIntent(
     .trim();
 
   if (!text) {
-    throw new Error("Gemini intent response was empty");
+    throw new Error("Gemini response was empty");
   }
 
-  const result = normalizeIntentResult(extractJson(text));
+  return extractJson(text);
+}
 
-  if (isIntentDebugEnabled()) {
-    console.log("[milkbot intent]", {
-      input,
-      context,
-      model,
-      intent: result.intent,
-      confidence: result.confidence,
-      reason: result.reason,
-    });
+export async function classifyTransitAssistantIntent(
+  input: string,
+  context: TransitAssistantIntentContext = {},
+): Promise<TransitAssistantIntentResult> {
+  const prompt = [
+    "Classify this TTC transit assistant user message into exactly one intent.",
+    "Return only JSON with this schema: {\"intent\":\"eta|delay|weather|traffic|events|holidays|crowding|navigation|help|out-of-scope\",\"confidence\":0-100,\"reason\":\"short\"}.",
+    "Intent meanings:",
+    "- eta: arrival time, next bus/streetcar, route/stop timing.",
+    "- delay: lateness, causes, accidents, construction, why slow.",
+    "- weather: weather or weather impact.",
+    "- traffic: road traffic or congestion impact.",
+    "- events: sports games, concerts, festivals, venues, large entertainment activity.",
+    "- holidays: public holidays, statutory holidays, long weekends, holiday greetings.",
+    "- crowding: passenger load, seats, packed vehicles.",
+    "- navigation: directions, trip planning, how to get to a destination.",
+    "- help: transit-related but missing needed details or clarification.",
+    "- out-of-scope: not about TTC transit, commuting, routing, stops, traffic, weather, events, holidays, or crowding.",
+    "Use context for follow-ups like 'what about now' or 'why'.",
+    `Context: ${JSON.stringify(context)}`,
+    `User message: ${input}`,
+  ].join("\n");
+
+  try {
+    const result = normalizeIntentResult(await requestGeminiJson(prompt));
+
+    if (isIntentDebugEnabled()) {
+      console.log("[milkbot intent]", {
+        input,
+        context,
+        model: process.env.GEMINI_MODEL ?? DEFAULT_MODEL,
+        intent: result.intent,
+        confidence: result.confidence,
+        reason: result.reason,
+      });
+    }
+
+    return result;
+  } catch (error) {
+    if (isIntentDebugEnabled()) {
+      console.log("[milkbot intent error]", {
+        input,
+        context,
+        model: process.env.GEMINI_MODEL ?? DEFAULT_MODEL,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    throw error;
   }
+}
 
-  return result;
+export async function verifyTransitAssistantAnswer(
+  request: TransitAssistantAnswerVerificationRequest,
+): Promise<TransitAssistantAnswerVerificationResult> {
+  const prompt = [
+    "You are checking the final answer for Milk bot, a TTC transit assistant.",
+    "Decide whether the draft answer correctly answers the user and is consistent with the provided context.",
+    "If the draft is correct, return it unchanged.",
+    "If the draft is irrelevant, misleading, contradictory, or fails to answer a simple question, rewrite it.",
+    "Do not invent precise TTC arrivals, routes, stops, weather, traffic, events, or holidays that are not present in the draft/context.",
+    "For simple general questions such as current time, greetings, or capability questions, answer directly and briefly.",
+    "Return only JSON with this schema: {\"isCorrect\":true|false,\"answer\":\"final answer\",\"confidence\":0-100,\"reason\":\"short\"}.",
+    `User message: ${request.input}`,
+    `Draft intent: ${request.matchedIntent}`,
+    `Draft confidence: ${request.confidence}`,
+    `Context: ${JSON.stringify(request.context ?? {})}`,
+    `Draft answer: ${request.draftAnswer}`,
+  ].join("\n");
+
+  try {
+    const result = normalizeAnswerVerificationResult(
+      await requestGeminiJson(prompt),
+      request.draftAnswer,
+    );
+
+    if (isIntentDebugEnabled()) {
+      console.log("[milkbot answer check]", {
+        input: request.input,
+        matchedIntent: request.matchedIntent,
+        isCorrect: result.isCorrect,
+        confidence: result.confidence,
+        reason: result.reason,
+      });
+    }
+
+    return result;
+  } catch (error) {
+    if (isIntentDebugEnabled()) {
+      console.log("[milkbot answer check error]", {
+        input: request.input,
+        matchedIntent: request.matchedIntent,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    throw error;
+  }
 }

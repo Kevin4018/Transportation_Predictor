@@ -182,6 +182,13 @@ interface TransitAssistantIntentResult {
   reason?: string;
 }
 
+interface TransitAssistantAnswerVerificationResult {
+  isCorrect: boolean;
+  answer: string;
+  confidence: number;
+  reason?: string;
+}
+
 const ROUTE_TERMINALS: Record<number, { label: string; terminals: string[]; notes?: string }> = {
   501: {
     label: "501 Queen",
@@ -279,6 +286,36 @@ async function classifyTransitAssistantIntent(
     return result.confidence >= 60 ? result : undefined;
   } catch {
     return undefined;
+  }
+}
+
+async function verifyTransitAssistantAnswer(
+  input: string,
+  draft: TransitAssistantAnswer,
+): Promise<TransitAssistantAnswer> {
+  try {
+    const result = await apiRequest<TransitAssistantAnswerVerificationResult>("/api/ttc/assistant/verify-answer", {
+      method: "POST",
+      body: {
+        input,
+        draftAnswer: draft.text,
+        matchedIntent: draft.matchedIntent,
+        confidence: draft.confidence,
+        context: draft.context,
+      },
+    });
+
+    if (result.isCorrect && result.answer === draft.text) {
+      return draft;
+    }
+
+    return {
+      ...draft,
+      text: result.answer || draft.text,
+      confidence: Math.max(draft.confidence, result.confidence),
+    };
+  } catch {
+    return draft;
   }
 }
 
@@ -467,6 +504,10 @@ function isGenericFollowUp(input: string): boolean {
 
 function isLocationQuestion(input: string): boolean {
   return /\b(?:where\s+am\s+i|where\s+are\s+we|my\s+location|current\s+location|where\s+is\s+my\s+location|am\s+i\s+near)\b/i.test(input);
+}
+
+function isCurrentTimeQuestion(input: string): boolean {
+  return /\b(?:what(?:'s|\s+is)?\s+the\s+time|what\s+time\s+is\s+it|current\s+time|time\s+now)\b/i.test(input);
 }
 
 function isNextVehicleFollowUp(input: string): boolean {
@@ -815,6 +856,15 @@ function formatTransitTime(date: Date): string {
     minute: "2-digit",
     timeZone: "America/Toronto",
   });
+}
+
+function answerCurrentTimeQuestion(context: TransitAssistantContext): TransitAssistantAnswer {
+  return {
+    matchedIntent: "help",
+    confidence: 95,
+    context: { ...context, lastIntent: "help" },
+    text: `It is ${formatTransitTime(new Date())} in Toronto.`,
+  };
 }
 
 function describeCurrentWeather(weather: CurrentWeather): string {
@@ -1509,7 +1559,7 @@ async function pickAssistantPrediction(
   };
 }
 
-export async function askTransitAssistant(
+async function buildTransitAssistantAnswer(
   input: string,
   context: TransitAssistantContext = {},
 ): Promise<TransitAssistantAnswer> {
@@ -1539,6 +1589,10 @@ export async function askTransitAssistant(
 
   if (isLocationQuestion(q)) {
     return answerLocationQuestion(context);
+  }
+
+  if (isCurrentTimeQuestion(q)) {
+    return answerCurrentTimeQuestion(context);
   }
 
   const classifiedIntent = await classifyTransitAssistantIntent(q, context);
@@ -1710,4 +1764,12 @@ export async function askTransitAssistant(
       text: "I could not match that to a TTC stop yet. Try including a stop name and route number, like 501 at College.",
     };
   }
+}
+
+export async function askTransitAssistant(
+  input: string,
+  context: TransitAssistantContext = {},
+): Promise<TransitAssistantAnswer> {
+  const draft = await buildTransitAssistantAnswer(input, context);
+  return verifyTransitAssistantAnswer(input.trim(), draft);
 }
