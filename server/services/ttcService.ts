@@ -36,7 +36,7 @@ export interface Prediction {
   direction: string;
   etaMin: number;
   confidence: number;
-  dirs: [string, string];
+  dirs: string[];
   routes: number[];
   offsets: {
     schedule: number;
@@ -113,14 +113,14 @@ export interface StopMeta {
   id: string;
   name: string;
   routes: number[];
-  dirs: [string, string];
+  dirs: string[];
   pos: [number, number];
 }
 
 interface StopRecord {
   name: string;
   routes: number[];
-  dirs: [string, string];
+  dirs: string[];
   pos: [number, number];
   predictions: Record<
     string,
@@ -517,10 +517,39 @@ const getGtfsStopDirs = (
   db: Database.Database,
   stopId: string,
   routeId?: number,
-): [string, string] => {
+): string[] => {
   const group = getGtfsStopGroup(db, stopId);
-  const stopIds = group?.stops.map((stop) => stop.stop_id) ?? [stopId];
-  const placeholders = stopIds.map(() => "?").join(", ");
+  const stopIds = new Set(group?.stops.map((stop) => stop.stop_id) ?? [stopId]);
+
+  if (routeId) {
+    const representativeStopId = getRepresentativeStopId(stopId);
+    const representativeStop = db
+      .prepare("SELECT stop_id, stop_name, stop_lat, stop_lon FROM stops WHERE stop_id = ?")
+      .get(representativeStopId) as GtfsStop | undefined;
+
+    if (representativeStop) {
+      const nearbyStops = db
+        .prepare(`
+          SELECT stop_id, stop_name, stop_lat, stop_lon
+          FROM stops
+          WHERE stop_lat BETWEEN ? AND ?
+            AND stop_lon BETWEEN ? AND ?
+        `)
+        .all(
+          representativeStop.stop_lat - 0.0012,
+          representativeStop.stop_lat + 0.0012,
+          representativeStop.stop_lon - 0.0012,
+          representativeStop.stop_lon + 0.0012,
+        ) as GtfsStop[];
+
+      nearbyStops
+        .filter((stop) => getActiveStopRoutes(db, stop.stop_id).has(String(routeId)))
+        .forEach((stop) => stopIds.add(stop.stop_id));
+    }
+  }
+
+  const groupedStopIds = [...stopIds];
+  const placeholders = groupedStopIds.map(() => "?").join(", ");
   const rows = db
     .prepare(`
       SELECT DISTINCT headsign
@@ -533,7 +562,7 @@ const getGtfsStopDirs = (
       ORDER BY headsign
     `)
     .all(
-      ...stopIds,
+      ...groupedStopIds,
       servicePeriodParam(),
       routeId ?? null,
       String(routeId ?? ""),
@@ -541,10 +570,7 @@ const getGtfsStopDirs = (
 
   const headsigns = pickRepresentativeHeadsigns(rows.map((row) => row.headsign));
 
-  return [
-    headsigns[0] ?? "Outbound",
-    headsigns[1] ?? "Inbound",
-  ];
+  return headsigns.length > 0 ? headsigns : ["Outbound"];
 };
 
 const getDistanceKm = (
@@ -591,6 +617,48 @@ const cleanHeadsign = (headsign: string) =>
     )
     .replace(/\s+/g, " ")
     .trim();
+
+const getHeadsignCardinal = (headsign: string) =>
+  headsign.match(/^(North|South|East|West)(?:bound)?\b/i)?.[1]?.toLowerCase() ??
+  headsign.match(/^(Inbound|Outbound)\b/i)?.[1]?.toLowerCase() ??
+  headsign.toLowerCase();
+
+const isShortTurnHeadsign = (headsign: string) =>
+  /\bshort\s*turn\b|shortturn|\bto\s+(?:dundas|broadview|bathurst|parliament|church|bay|ossington|roncesvalles)\b/i.test(headsign);
+
+const getHeadsignScore = (headsign: string) => {
+  let score = 0;
+  if (isShortTurnHeadsign(headsign)) score += 10;
+  if (/\binbound\b|\boutbound\b/i.test(headsign)) score += 5;
+  score += Math.min(headsign.length / 100, 3);
+  return score;
+};
+
+const pickRepresentativeHeadsigns = (rawHeadsigns: string[]) => {
+  const cleanedHeadsigns = [...new Set(rawHeadsigns.map(cleanHeadsign).filter(Boolean))]
+    .sort((a, b) => getHeadsignScore(a) - getHeadsignScore(b));
+  const byCardinal = new Map<string, string[]>();
+
+  cleanedHeadsigns.forEach((headsign) => {
+    const cardinal = getHeadsignCardinal(headsign);
+    byCardinal.set(cardinal, [...(byCardinal.get(cardinal) ?? []), headsign]);
+  });
+
+  const preferredOrder = ["north", "south", "east", "west", "inbound", "outbound"];
+  const picked: string[] = [];
+
+  preferredOrder.forEach((cardinal) => {
+    const candidate = byCardinal.get(cardinal)?.[0];
+    if (candidate && !picked.includes(candidate)) picked.push(candidate);
+  });
+
+  cleanedHeadsigns.forEach((headsign) => {
+    if (picked.length >= 2) return;
+    if (!picked.includes(headsign)) picked.push(headsign);
+  });
+
+  return picked.slice(0, 2);
+};
 
 const getCurrentMinutes = () => {
   const currentMinutes = getTorontoClockMinutes();
