@@ -29,6 +29,115 @@ const parseNavigationMode = (value: unknown): NavigationMode => {
   return mode === "car" || mode === "walk" || mode === "bike" ? mode : "bus";
 };
 
+const formatDebugOtpDateTime = () => {
+  const configured = process.env.OTP_PLAN_DATETIME;
+  if (configured && configured !== "match-weekday") return configured;
+
+  const feedStart = process.env.OTP_GTFS_SERVICE_START_DATE ?? "2026-06-21";
+  const [year, month, day] = feedStart.split("-").map(Number);
+  if (!year || !month || !day) return undefined;
+
+  const now = new Date();
+  const candidate = new Date(year, month - 1, day, now.getHours(), now.getMinutes(), now.getSeconds());
+  const dayOffset = (now.getDay() - candidate.getDay() + 7) % 7;
+  candidate.setDate(candidate.getDate() + dayOffset);
+
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${candidate.getFullYear()}-${pad(candidate.getMonth() + 1)}-${pad(candidate.getDate())}T${pad(candidate.getHours())}:${pad(candidate.getMinutes())}:${pad(candidate.getSeconds())}-04:00`;
+};
+
+router.get("/debug/otp", async (_req, res) => {
+  const otpBaseUrl = process.env.OTP_BASE_URL ?? "http://localhost:8080";
+  const url = new URL("/otp/gtfs/v1", otpBaseUrl.replace(/\/$/, ""));
+  const planDateTime = formatDebugOtpDateTime();
+  const query = `
+    query DebugOtp($planDateTime: OffsetDateTime!) {
+      planConnection(
+        origin: { label: "Origin", location: { coordinate: { latitude: 43.6639, longitude: -79.3832 } } }
+        destination: { label: "CN Tower", location: { coordinate: { latitude: 43.6426, longitude: -79.3871 } } }
+        dateTime: { earliestDeparture: $planDateTime }
+        modes: { transit: { access: [WALK], egress: [WALK], transfer: [WALK] } transitOnly: true }
+        first: 1
+      ) {
+        routingErrors { code description }
+        edges {
+          node {
+            duration
+            legs {
+              mode
+              transitLeg
+              route { shortName longName }
+              from { name }
+              to { name }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({
+        query,
+        variables: { planDateTime },
+      }),
+    });
+
+    const text = await response.text();
+    let body: unknown = text;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      // Keep the raw response text for debugging non-JSON failures.
+    }
+
+    const data = body as {
+      data?: {
+        planConnection?: {
+          routingErrors?: unknown[];
+          edges?: Array<{ node?: { legs?: unknown[] } }>;
+        };
+      };
+      errors?: unknown[];
+    };
+
+    res.json({
+      otpBaseUrl,
+      otpUrl: url.toString(),
+      otpPlanDateTime: process.env.OTP_PLAN_DATETIME ?? null,
+      otpGtfsServiceStartDate: process.env.OTP_GTFS_SERVICE_START_DATE ?? null,
+      resolvedPlanDateTime: planDateTime,
+      reachable: response.ok,
+      status: response.status,
+      statusText: response.statusText,
+      errors: data.errors ?? [],
+      routingErrors: data.data?.planConnection?.routingErrors ?? [],
+      legs: data.data?.planConnection?.edges?.[0]?.node?.legs ?? [],
+      rawBody: response.ok ? undefined : body,
+    });
+  } catch (error) {
+    res.status(502).json({
+      otpBaseUrl,
+      otpUrl: url.toString(),
+      otpPlanDateTime: process.env.OTP_PLAN_DATETIME ?? null,
+      otpGtfsServiceStartDate: process.env.OTP_GTFS_SERVICE_START_DATE ?? null,
+      resolvedPlanDateTime: planDateTime,
+      reachable: false,
+      errorName: error instanceof Error ? error.name : "UnknownError",
+      errorMessage: error instanceof Error ? error.message : String(error),
+    });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+});
+
 router.get("/stops/search", (req, res) => {
   res.json(searchStops(String(req.query.q ?? "")));
 });
