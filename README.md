@@ -74,7 +74,7 @@ OTP_GTFS_SERVICE_START_DATE=2026-06-21
 TICKETMASTER_API_KEY=optional_ticketmaster_discovery_api_key
 ```
 
-`GEMINI_API_KEY` is used only by the Express API server for chatbot intent classification. Do not put this key in a `VITE_` variable, because Vite exposes those values to the browser bundle.
+`GEMINI_API_KEY` is used only by the Express API server for chatbot intent classification and answer verification/correction. Do not put this key in a `VITE_` variable, because Vite exposes those values to the browser bundle.
 
 `OTP_PLAN_DATETIME=match-weekday` maps the current clock time to the same weekday inside the GTFS feed calendar. This avoids failed transit searches when today's real date is outside the downloaded TTC feed's service dates.
 

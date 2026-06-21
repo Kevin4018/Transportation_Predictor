@@ -182,6 +182,13 @@ interface TransitAssistantIntentResult {
   reason?: string;
 }
 
+interface TransitAssistantAnswerVerificationResult {
+  isCorrect: boolean;
+  answer: string;
+  confidence: number;
+  reason?: string;
+}
+
 const ROUTE_TERMINALS: Record<number, { label: string; terminals: string[]; notes?: string }> = {
   501: {
     label: "501 Queen",
@@ -279,6 +286,36 @@ async function classifyTransitAssistantIntent(
     return result.confidence >= 60 ? result : undefined;
   } catch {
     return undefined;
+  }
+}
+
+async function verifyTransitAssistantAnswer(
+  input: string,
+  draft: TransitAssistantAnswer,
+): Promise<TransitAssistantAnswer> {
+  try {
+    const result = await apiRequest<TransitAssistantAnswerVerificationResult>("/api/ttc/assistant/verify-answer", {
+      method: "POST",
+      body: {
+        input,
+        draftAnswer: draft.text,
+        matchedIntent: draft.matchedIntent,
+        confidence: draft.confidence,
+        context: draft.context,
+      },
+    });
+
+    if (result.isCorrect && result.answer === draft.text) {
+      return draft;
+    }
+
+    return {
+      ...draft,
+      text: result.answer || draft.text,
+      confidence: Math.max(draft.confidence, result.confidence),
+    };
+  } catch {
+    return draft;
   }
 }
 
@@ -1522,7 +1559,7 @@ async function pickAssistantPrediction(
   };
 }
 
-export async function askTransitAssistant(
+async function buildTransitAssistantAnswer(
   input: string,
   context: TransitAssistantContext = {},
 ): Promise<TransitAssistantAnswer> {
@@ -1727,4 +1764,12 @@ export async function askTransitAssistant(
       text: "I could not match that to a TTC stop yet. Try including a stop name and route number, like 501 at College.",
     };
   }
+}
+
+export async function askTransitAssistant(
+  input: string,
+  context: TransitAssistantContext = {},
+): Promise<TransitAssistantAnswer> {
+  const draft = await buildTransitAssistantAnswer(input, context);
+  return verifyTransitAssistantAnswer(input.trim(), draft);
 }

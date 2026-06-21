@@ -11,6 +11,8 @@ import {
 } from "../services/ttcService";
 import {
   classifyTransitAssistantIntent,
+  verifyTransitAssistantAnswer,
+  type TransitAssistantIntent,
   type TransitAssistantIntentContext,
 } from "../services/geminiIntentService";
 import type { NavigationMode } from "../services/ttcService";
@@ -115,6 +117,33 @@ router.post("/assistant/intent", async (req, res, next) => {
     }
 
     res.json(await classifyTransitAssistantIntent(input, context));
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/assistant/verify-answer", async (req, res, next) => {
+  try {
+    const input = String(req.body?.input ?? "").trim();
+    const draftAnswer = String(req.body?.draftAnswer ?? "").trim();
+    const matchedIntent = String(req.body?.matchedIntent ?? "help") as TransitAssistantIntent;
+    const confidence = parseNumber(req.body?.confidence, 60);
+    const context = (req.body?.context ?? {}) as TransitAssistantIntentContext;
+
+    if (!input || !draftAnswer) {
+      res.status(400).json({ message: "input and draftAnswer are required" });
+      return;
+    }
+
+    res.json(
+      await verifyTransitAssistantAnswer({
+        input,
+        draftAnswer,
+        matchedIntent,
+        confidence,
+        context,
+      }),
+    );
   } catch (error) {
     next(error);
   }
