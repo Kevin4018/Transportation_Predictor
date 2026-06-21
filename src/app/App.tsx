@@ -343,13 +343,11 @@ function estimateWeatherDelay(weather: CurrentWeather): number {
 }
 
 function describeWeatherDelay(weather: CurrentWeather, delay: number): string {
-  const source = weather.source === "weatherapi" ? "WeatherAPI" : "mock weather data";
-
   if (delay === 0) {
-    return `${source} reports ${weather.condition.toLowerCase()}, ${weather.temperatureC} C, wind ${weather.windKph} km/h. No weather delay is expected.`;
+    return `Current weather is ${weather.condition.toLowerCase()}, ${weather.temperatureC} C, with wind ${weather.windKph} km/h. No weather delay is expected.`;
   }
 
-  return `${source} reports ${weather.condition.toLowerCase()}, ${weather.temperatureC} C, wind ${weather.windKph} km/h. Current conditions may add about ${delay} min to this trip.`;
+  return `Current weather is ${weather.condition.toLowerCase()}, ${weather.temperatureC} C, with wind ${weather.windKph} km/h. Current conditions may add about ${delay} min to this trip.`;
 }
 
 function describeTrafficDelay(impact: TrafficImpact, key: "traffic" | "accident" | "construction") {
@@ -368,9 +366,7 @@ function describeConstructionDelay(impact: ConstructionImpact) {
   const event = impact.events[0];
 
   if (!event) {
-    return impact.source === "geojson"
-      ? "No nearby road reconstruction projects are listed in the static dataset."
-      : "No construction dataset is configured yet.";
+    return "No nearby construction activity is expected to affect this route.";
   }
 
   return `${event.title}. ${event.description} (${event.distanceKm.toFixed(1)} km away).`;
@@ -378,26 +374,22 @@ function describeConstructionDelay(impact: ConstructionImpact) {
 
 function describeEventDelay(impact: EventImpact) {
   const event = impact.events[0];
-  const source = impact.source === "ticketmaster" ? "Ticketmaster event data" : "Toronto venue pressure estimate";
 
   if (!event) {
-    return impact.source === "ticketmaster"
-      ? "No nearby sports games, concerts, or major entertainment events are showing in the event feed for this trip window."
-      : "No major Toronto venue pressure is expected for this trip window.";
+    return "No nearby sports games, concerts, or major entertainment events are expected to affect this trip window.";
   }
 
-  return `${source}: ${event.description} (${event.distanceKm.toFixed(1)} km away).`;
+  return `${event.description} (${event.distanceKm.toFixed(1)} km away).`;
 }
 
 function describeHolidayDelay(impact: HolidayImpact) {
   const holiday = impact.holidays[0];
-  const source = impact.source === "nager" ? "Nager.Date holiday data" : "local holiday fallback";
 
   if (!holiday) {
     return "No Ontario public holiday is detected for this trip date.";
   }
 
-  return `${source}: ${impact.description}`;
+  return impact.description;
 }
 
 function estimateConfidenceFromFactors(factors: BusReportData["factors"]) {
@@ -515,6 +507,57 @@ function directionTextClass(label: string) {
 // ── Search overlay ──
 type SearchTarget = "general" | "origin" | "destination";
 type OriginSelection = { label: string; pos: [number, number] };
+type RecommendationCategory = "Restaurants" | "Attractions" | "Parks" | "Shopping";
+type DestinationRecommendation = {
+  category: RecommendationCategory;
+  name: string;
+  address: string;
+  pos: [number, number];
+};
+
+const DESTINATION_RECOMMENDATIONS: DestinationRecommendation[] = [
+  { category: "Restaurants", name: "Kensington Market", address: "Kensington Ave, Toronto, ON", pos: [43.6548, -79.4004] },
+  { category: "Restaurants", name: "St. Lawrence Market", address: "93 Front St E, Toronto, ON", pos: [43.6487, -79.3716] },
+  { category: "Restaurants", name: "Chinatown", address: "Spadina Ave, Toronto, ON", pos: [43.6538, -79.3986] },
+  { category: "Restaurants", name: "Queen West Restaurants", address: "Queen St W, Toronto, ON", pos: [43.6488, -79.3998] },
+  { category: "Attractions", name: "CN Tower", address: "290 Bremner Blvd, Toronto, ON", pos: [43.6426, -79.3871] },
+  { category: "Attractions", name: "Ripley's Aquarium of Canada", address: "288 Bremner Blvd, Toronto, ON", pos: [43.6424, -79.3860] },
+  { category: "Attractions", name: "Royal Ontario Museum", address: "100 Queens Park, Toronto, ON", pos: [43.6677, -79.3948] },
+  { category: "Attractions", name: "Art Gallery of Ontario", address: "317 Dundas St W, Toronto, ON", pos: [43.6536, -79.3925] },
+  { category: "Parks", name: "Toronto Islands Ferry", address: "Jack Layton Ferry Terminal, Toronto, ON", pos: [43.6408, -79.3759] },
+  { category: "Parks", name: "Trinity Bellwoods Park", address: "790 Queen St W, Toronto, ON", pos: [43.6476, -79.4133] },
+  { category: "Parks", name: "High Park", address: "1873 Bloor St W, Toronto, ON", pos: [43.6465, -79.4637] },
+  { category: "Shopping", name: "CF Toronto Eaton Centre", address: "220 Yonge St, Toronto, ON", pos: [43.6544, -79.3807] },
+  { category: "Shopping", name: "Yorkville Village", address: "55 Avenue Rd, Toronto, ON", pos: [43.6717, -79.3940] },
+];
+
+const getDistanceKm = (from: [number, number], to: [number, number]) => {
+  const toRad = (value: number) => value * Math.PI / 180;
+  const earthRadiusKm = 6371;
+  const dLat = toRad(to[0] - from[0]);
+  const dLng = toRad(to[1] - from[1]);
+  const lat1 = toRad(from[0]);
+  const lat2 = toRad(to[0]);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  return earthRadiusKm * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+};
+
+const encodeGeoDestinationId = (recommendation: DestinationRecommendation) => {
+  const destination = {
+    name: recommendation.name,
+    address: recommendation.address,
+    lat: recommendation.pos[0],
+    lng: recommendation.pos[1],
+    distance: recommendation.category,
+  };
+  const json = JSON.stringify(destination);
+  const bytes = new TextEncoder().encode(json);
+  let binary = "";
+  bytes.forEach(byte => { binary += String.fromCharCode(byte); });
+  return `geo:${btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")}`;
+};
 
 interface SearchOverlayProps {
   query: string;
@@ -534,6 +577,28 @@ function SearchOverlay({ query, target, currentLocation, onQueryChange, onClose,
   type Row = { id: string; type: "stop" | "dest"; title: string; subtitle: string; distance: string; pos?: [number, number] };
   const [results, setResults] = useState<Row[]>([]);
   const [loading, setLoading] = useState(false);
+  const recommendationOrigin = currentLocation?.pos ?? TORONTO;
+  const recommendationRows = DESTINATION_RECOMMENDATIONS
+    .map(recommendation => ({
+      ...recommendation,
+      id: encodeGeoDestinationId(recommendation),
+      distanceKm: getDistanceKm(recommendationOrigin, recommendation.pos),
+    }))
+    .sort((a, b) => a.distanceKm - b.distanceKm);
+  const groupedRecommendations = recommendationRows.reduce<Record<RecommendationCategory, typeof recommendationRows>>((groups, recommendation) => {
+    const existing = groups[recommendation.category] ?? [];
+    if (existing.length < 3) {
+      groups[recommendation.category] = [...existing, recommendation];
+    }
+    return groups;
+  }, {} as Record<RecommendationCategory, typeof recommendationRows>);
+  const showRecommendations = query.trim().length === 0 && target !== "origin";
+  const categoryIcon: Record<RecommendationCategory, string> = {
+    Restaurants: "🍜",
+    Attractions: "📍",
+    Parks: "🌳",
+    Shopping: "🛍️",
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -594,6 +659,45 @@ function SearchOverlay({ query, target, currentLocation, onQueryChange, onClose,
           </div>
         ) : (
           <>
+            {showRecommendations && (
+              <div className="pt-3 pb-8">
+                <div className="px-4 pb-2">
+                  <p className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-[#858585] tracking-[-0.08px]">
+                    Nearby recommendations
+                  </p>
+                </div>
+                {(["Restaurants", "Attractions", "Parks", "Shopping"] as RecommendationCategory[]).map(category => {
+                  const items = groupedRecommendations[category] ?? [];
+                  if (items.length === 0) return null;
+
+                  return (
+                    <div key={category} className="mb-3">
+                      <div className="px-4 py-1 flex items-center gap-2">
+                        <span className="text-[18px] leading-none">{categoryIcon[category]}</span>
+                        <p className="font-['SF_Compact',system-ui,sans-serif] text-[15px] text-black tracking-[-0.08px]">{category}</p>
+                      </div>
+                      {items.map(item => (
+                        <button
+                          key={item.id}
+                          onClick={() => onSelectDest(item.id)}
+                          className="w-full flex items-start gap-3 px-4 py-3 border-b border-[#ececec] bg-white hover:bg-gray-50 text-left"
+                        >
+                          <div className="size-[24px] shrink-0 mt-0.5"><PinIcon /></div>
+                          <div className="flex-1 min-w-0">
+                            <p className="font-['SF_Compact',system-ui,sans-serif] text-[17px] text-black tracking-[-0.08px] truncate">{item.name}</p>
+                            <p className="font-['SF_Compact',system-ui,sans-serif] text-[12px] text-[#858585] tracking-[-0.08px] truncate">{item.address}</p>
+                          </div>
+                          <div className="flex flex-col items-end shrink-0 gap-1">
+                            <div className="size-[18px]"><ArrowUpRightIcon /></div>
+                            <span className="font-['SF_Compact',system-ui,sans-serif] text-[12px] text-[#858585]">{item.distanceKm.toFixed(1)} km</span>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
             {target === "origin" && currentLocation && (
               <button
                 onClick={onSelectCurrentLocation}

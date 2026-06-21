@@ -399,12 +399,14 @@ const getGtfsStopDestination = (
   const group = getGtfsStopGroup(db, stopId);
   const representativeStop = group?.stops[0];
   if (!group || !representativeStop) return null;
+  const lat = group.stops.reduce((sum, stop) => sum + stop.stop_lat, 0) / group.stops.length;
+  const lng = group.stops.reduce((sum, stop) => sum + stop.stop_lon, 0) / group.stops.length;
 
   return {
     name: group.name,
     address: "TTC stop",
-    lat: representativeStop.stop_lat,
-    lng: representativeStop.stop_lon,
+    lat,
+    lng,
     distance: "TTC stop",
     walkMin: 0,
     walkMeters: 0,
@@ -1180,26 +1182,30 @@ const searchNominatimDestinations = async (query: string): Promise<DestinationRe
   }
 };
 
+const searchStopDestinations = (query: string): DestinationResult[] =>
+  searchStops(query)
+    .map((stop) => {
+      const destination = getDestinationRecord(stop.id);
+      return {
+        source: stop.source,
+        id: stop.id,
+        name: `destination: ${destination?.name ?? stop.name.replace(/^bus stop:\s*/i, "")}`,
+        address: destination?.address ?? "TTC stop",
+        distance: destination?.distance ?? stop.distance,
+        pos: destination ? [destination.lat, destination.lng] as [number, number] : stop.pos,
+      };
+    });
+
 export const searchDestinations = async (query: string): Promise<DestinationResult[]> => {
   const q = query.toLowerCase().trim();
   if (!q) return [];
 
+  const stopResults = searchStopDestinations(query);
   const liveResults = [
     ...await searchPhotonDestinations(query),
     ...await searchNominatimDestinations(query),
   ];
-  if (liveResults.length > 0) {
-    const seen = new Set<string>();
-    return liveResults.filter((result) => {
-      if (!result.pos) return false;
-      const key = `${result.pos[0].toFixed(5)},${result.pos[1].toFixed(5)}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    }).slice(0, 10);
-  }
-
-  return Object.entries(DEST_DB)
+  const fixedResults = Object.entries(DEST_DB)
     .filter(
       ([, destination]) =>
         destination.name.toLowerCase().includes(q) ||
@@ -1211,9 +1217,26 @@ export const searchDestinations = async (query: string): Promise<DestinationResu
       name: `destination: ${destination.name}`,
       address: destination.address,
       distance: destination.distance,
-      pos: [destination.lat, destination.lng],
-    }))
-    .slice(0, 5);
+      pos: [destination.lat, destination.lng] as [number, number],
+    }));
+
+  const isTransitStationQuery = /\b(?:station|stop|ttc|subway|streetcar|bus)\b/i.test(query);
+  const candidates = isTransitStationQuery
+    ? [...stopResults, ...fixedResults, ...liveResults]
+    : [...fixedResults, ...liveResults, ...stopResults];
+
+  if (candidates.length > 0) {
+    const seen = new Set<string>();
+    return candidates.filter((result) => {
+      if (!result.pos) return false;
+      const key = `${result.pos[0].toFixed(5)},${result.pos[1].toFixed(5)}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).slice(0, 10);
+  }
+
+  return [];
 };
 
 export const getNearbyStops = (_lat: number, _lng: number): NearbyStop[] =>
@@ -1729,7 +1752,7 @@ const getUnavailableNavigationRoute = (
 ): NavigationRoute => ({
   source: "otp",
   available: false,
-  message: detail ? `Cannot find ${modeLabel(mode).toLowerCase()} route.` : `Cannot find ${modeLabel(mode).toLowerCase()} route.`,
+  message: `I found ${dest.name}${dest.address ? ` at ${dest.address}` : ""}, but I cannot calculate a complete live ${modeLabel(mode).toLowerCase()} route from your current origin right now.`,
   originCoordinates,
   destinationCoordinates: { lat: dest.lat, lng: dest.lng },
   destName: dest.name,

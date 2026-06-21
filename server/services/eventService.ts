@@ -165,7 +165,7 @@ const getMockEvents = (lat: number, lng: number, targetTime: Date): CityEvent[] 
         kind,
         title: `Major ${kind === "sports" ? "game" : "show"} window`,
         venueName: venue.name,
-        description: `No event API key is configured, so the app is estimating event pressure from major Toronto venues near ${venue.name} around ${formatTorontoEventTime(startsAt)}.`,
+        description: `Large crowds may build near ${venue.name} around ${formatTorontoEventTime(startsAt)}.`,
         startsAt: startsAt.toISOString(),
         lat: venue.lat,
         lng: venue.lng,
