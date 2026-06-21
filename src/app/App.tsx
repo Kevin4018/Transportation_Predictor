@@ -24,11 +24,12 @@ interface LeafletMapProps {
   selectedStopId?: string;
   onSelectStop?: (id: string) => void;
   onMoveEnd?: (center: [number, number]) => void;
+  onZoomEnd?: (zoom: number) => void;
   className?: string;
 }
 
 /** Pure-DOM Leaflet map — no react-leaflet context, works with any React version */
-function LeafletMap({ center, zoom, userPos, locationStatus, stops, routeLine, destinationPos, transitMarkers, selectedStopId, onSelectStop, onMoveEnd, className }: LeafletMapProps) {
+function LeafletMap({ center, zoom, userPos, locationStatus, stops, routeLine, destinationPos, transitMarkers, selectedStopId, onSelectStop, onMoveEnd, onZoomEnd, className }: LeafletMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
   const userMarkerRef = useRef<L.Marker | null>(null);
@@ -37,6 +38,7 @@ function LeafletMap({ center, zoom, userPos, locationStatus, stops, routeLine, d
   const destinationMarkerRef = useRef<L.Marker | null>(null);
   const transitMarkersRef = useRef<L.Marker[]>([]);
   const skipNextMoveEndRef = useRef(false);
+  const lastSentCenterRef = useRef<[number, number] | null>(center);
 
   // Boot the map once
   useEffect(() => {
@@ -47,6 +49,9 @@ function LeafletMap({ center, zoom, userPos, locationStatus, stops, routeLine, d
       zoom,
       zoomControl: false,
       attributionControl: false,
+      zoomAnimation: false,
+      fadeAnimation: false,
+      markerZoomAnimation: false,
     });
     mapRef.current = map;
 
@@ -59,8 +64,31 @@ function LeafletMap({ center, zoom, userPos, locationStatus, stops, routeLine, d
       }
 
       const nextCenter = map.getCenter();
-      onMoveEnd?.([nextCenter.lat, nextCenter.lng]);
+      const next: [number, number] = [nextCenter.lat, nextCenter.lng];
+      const last = lastSentCenterRef.current;
+      if (
+        last &&
+        Math.abs(last[0] - next[0]) < 0.00005 &&
+        Math.abs(last[1] - next[1]) < 0.00005
+      ) {
+        return;
+      }
+
+      lastSentCenterRef.current = next;
+      onMoveEnd?.(next);
     });
+
+    map.on("zoomstart", () => {
+      skipNextMoveEndRef.current = true;
+    });
+
+    map.on("zoomend", () => {
+      skipNextMoveEndRef.current = false;
+      onZoomEnd?.(map.getZoom());
+      window.requestAnimationFrame(() => map.invalidateSize({ animate: false }));
+    });
+
+    window.requestAnimationFrame(() => map.invalidateSize({ animate: false }));
 
     // Stop markers render in a separate effect so async nearby stops can update.
     if (false && stops) {
@@ -79,7 +107,10 @@ function LeafletMap({ center, zoom, userPos, locationStatus, stops, routeLine, d
       });
     }
 
-    return () => { map.remove(); mapRef.current = null; };
+    return () => {
+      map.remove();
+      mapRef.current = null;
+    };
   }, []);                                       // eslint-disable-line react-hooks/exhaustive-deps
 
   // Recenter when center changes
@@ -90,14 +121,14 @@ function LeafletMap({ center, zoom, userPos, locationStatus, stops, routeLine, d
     const currentCenter = map.getCenter();
     const alreadyCentered =
       Math.abs(currentCenter.lat - center[0]) < 0.00001 &&
-      Math.abs(currentCenter.lng - center[1]) < 0.00001 &&
-      map.getZoom() === zoom;
+      Math.abs(currentCenter.lng - center[1]) < 0.00001;
 
     if (alreadyCentered) return;
 
     skipNextMoveEndRef.current = true;
-    map.setView(center, zoom, { animate: false });
-  }, [center[0], center[1], zoom]);             // eslint-disable-line react-hooks/exhaustive-deps
+    lastSentCenterRef.current = center;
+    map.panTo(center, { animate: false });
+  }, [center[0], center[1]]);                   // eslint-disable-line react-hooks/exhaustive-deps
 
   // User location marker
   useEffect(() => {
@@ -626,6 +657,7 @@ function MapScreen({ stopId, showControls, mapCenter, userPos, locationStatus, o
   const [loadingPrediction, setLoadingPrediction] = useState(true);
   const [selectedRoute, setSelectedRoute] = useState<number | null>(null);
   const [dir, setDir] = useState<string | null>(null);
+  const [mapZoom, setMapZoom] = useState(15);
   const [nearbyStops, setNearbyStops] = useState<NearbyStop[]>([]);
   const [weather, setWeather] = useState<CurrentWeather | null>(null);
   const [trafficImpact, setTrafficImpact] = useState<TrafficImpact | null>(null);
@@ -749,12 +781,13 @@ function MapScreen({ stopId, showControls, mapCenter, userPos, locationStatus, o
         <div className="rounded-[12px] overflow-hidden h-[280px] w-full">
           <LeafletMap
             center={mapCenter}
-            zoom={15}
+            zoom={mapZoom}
             userPos={userPos}
             locationStatus={locationStatus}
             stops={nearbyStops}
             selectedStopId={stopId}
             onSelectStop={onSelectStop}
+            onZoomEnd={setMapZoom}
             onMoveEnd={center => {
               onMapMove(center);
               getNearbyStops(center[0], center[1]).then(setNearbyStops);
@@ -1822,10 +1855,9 @@ export default function App() {
         }}
       >
       <div
-        className="w-[390px] min-h-[844px] bg-white relative overflow-x-hidden origin-top"
+        className="w-[390px] min-h-[844px] bg-white relative overflow-x-hidden"
         style={{
-          transform: `scale(${canvasScale})`,
-          transformOrigin: "top left",
+          zoom: canvasScale,
         }}
       >
         {searching ? (

@@ -65,12 +65,16 @@ Important `.env` values:
 
 ```env
 PORT=3001
+GEMINI_API_KEY=your_gemini_api_key_here
+GEMINI_MODEL=gemini-2.0-flash
 GTFS_DB_PATH=./data/gtfs.sqlite
 OTP_BASE_URL=http://localhost:8080
 OTP_PLAN_DATETIME=match-weekday
 OTP_GTFS_SERVICE_START_DATE=2026-06-21
 TICKETMASTER_API_KEY=optional_ticketmaster_discovery_api_key
 ```
+
+`GEMINI_API_KEY` is used only by the Express API server for chatbot intent classification. Do not put this key in a `VITE_` variable, because Vite exposes those values to the browser bundle.
 
 `OTP_PLAN_DATETIME=match-weekday` maps the current clock time to the same weekday inside the GTFS feed calendar. This avoids failed transit searches when today's real date is outside the downloaded TTC feed's service dates.
 

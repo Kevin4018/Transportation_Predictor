@@ -157,11 +157,29 @@ export interface TransitAssistantContext {
   lastIntent?: TransitAssistantAnswer["matchedIntent"];
 }
 
+export type TransitAssistantIntent =
+  | "eta"
+  | "delay"
+  | "weather"
+  | "traffic"
+  | "events"
+  | "holidays"
+  | "crowding"
+  | "navigation"
+  | "help"
+  | "out-of-scope";
+
 export interface TransitAssistantAnswer {
   text: string;
-  matchedIntent: "eta" | "delay" | "weather" | "traffic" | "events" | "holidays" | "crowding" | "navigation" | "help" | "out-of-scope";
+  matchedIntent: TransitAssistantIntent;
   confidence: number;
   context?: TransitAssistantContext;
+}
+
+interface TransitAssistantIntentResult {
+  intent: TransitAssistantIntent;
+  confidence: number;
+  reason?: string;
 }
 
 const ROUTE_TERMINALS: Record<number, { label: string; terminals: string[]; notes?: string }> = {
@@ -246,6 +264,22 @@ export function getNavigationRoute(
       mode,
     },
   });
+}
+
+async function classifyTransitAssistantIntent(
+  input: string,
+  context: TransitAssistantContext,
+): Promise<TransitAssistantIntentResult | undefined> {
+  try {
+    const result = await apiRequest<TransitAssistantIntentResult>("/api/ttc/assistant/intent", {
+      method: "POST",
+      body: { input, context },
+    });
+
+    return result.confidence >= 60 ? result : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function findRouteInText(input: string): number | undefined {
@@ -372,6 +406,43 @@ function extractStopQuery(input: string): string | undefined {
   }
 
   return undefined;
+}
+
+function maybeLooksLikeStopName(input: string): boolean {
+  const cleaned = input.trim();
+  if (cleaned.length < 3 || cleaned.length > 80) return false;
+  if (findRouteInText(cleaned)) return false;
+
+  return /\b(?:at|and|&|station|st|street|ave|avenue|road|rd|college|bay|yonge|bathurst|queen|king|dundas|spadina|bloor|union)\b/i.test(cleaned);
+}
+
+async function answerStopContextQuestion(
+  input: string,
+  context: TransitAssistantContext,
+): Promise<TransitAssistantAnswer | null> {
+  if (!maybeLooksLikeStopName(input)) return null;
+
+  const stops = await searchStops(input);
+  const stop = stops[0];
+  if (!stop) return null;
+
+  const meta = await getStopMeta(stop.id);
+  const routeText = meta.routes.length > 0
+    ? ` Routes here right now: ${meta.routes.slice(0, 6).join(", ")}.`
+    : "";
+
+  return {
+    matchedIntent: "help",
+    confidence: 82,
+    context: {
+      ...context,
+      stopId: meta.id,
+      routeId: meta.routes[0] ?? context.routeId,
+      direction: meta.dirs[0] ?? context.direction,
+      lastIntent: "help",
+    },
+    text: `I found ${meta.name}.${routeText} Ask "when is ${meta.routes[0] ?? "the bus"}?" for the next arrival at this stop.`,
+  };
 }
 
 function isDestinationFollowUp(input: string): boolean {
@@ -1364,15 +1435,20 @@ async function pickAssistantPrediction(
   const followUpWithRouteContext = isGenericFollowUp(input) && hasRouteContext(context);
   const routeId = findRouteInText(input) ?? context.routeId;
   const directionFromText = findDirectionInText(input) ?? context.direction;
+  const explicitStopQuery = extractStopQuery(input);
   let stopId = context.stopId;
+
+  if (explicitStopQuery) {
+    const explicitStops = await searchStops(explicitStopQuery);
+    stopId = explicitStops[0]?.id ?? stopId;
+  }
 
   if (!stopId && routeId && isRouteNumberOnlyInput(input)) {
     throw new Error("Route number needs a stop context");
   }
 
   if (!stopId) {
-    const stopQuery = extractStopQuery(input);
-    const stops = await searchStops(stopQuery || (routeId && followUpWithRouteContext ? String(routeId) : input));
+    const stops = await searchStops(explicitStopQuery || (routeId && followUpWithRouteContext ? String(routeId) : input));
     stopId = stops[0]?.id;
   }
 
@@ -1382,12 +1458,10 @@ async function pickAssistantPrediction(
 
   let meta = await getStopMeta(stopId);
   if (routeId && !meta.routes.includes(routeId)) {
-    const stopQuery = extractStopQuery(input);
-
-    if (stopQuery) {
-      const routeStops = await searchStops(stopQuery);
+    if (explicitStopQuery) {
+      const routeStops = await searchStops(explicitStopQuery);
       const matchingStop = routeStops.find(stop => stopServesRoute(stop, routeId))
-        ?? await findRouteStopByQuery(routeId, stopQuery);
+        ?? await findRouteStopByQuery(routeId, explicitStopQuery);
       if (matchingStop) {
         stopId = matchingStop.id;
         meta = await getStopMeta(stopId);
@@ -1467,14 +1541,16 @@ export async function askTransitAssistant(
     return answerLocationQuestion(context);
   }
 
+  const classifiedIntent = await classifyTransitAssistantIntent(q, context);
+  const llmIntent = classifiedIntent?.intent;
   const followUp = isGenericFollowUp(q) && hasAssistantContext(context);
-  const wantsWeather = isWeatherQuestion(q) || (context.lastIntent === "weather" && (isTimeFollowUp(q) || followUp));
-  const wantsTraffic = isTrafficQuestion(q) || (context.lastIntent === "traffic" && (isTimeFollowUp(q) || followUp));
-  const wantsEvents = isEventQuestion(q) || (context.lastIntent === "events" && (isTimeFollowUp(q) || followUp));
-  const wantsHolidays = isHolidayQuestion(q) || (context.lastIntent === "holidays" && (isTimeFollowUp(q) || followUp));
-  const wantsDelay = isDelayQuestion(q) || (context.lastIntent === "delay" && followUp);
-  const wantsCrowding = isCrowdingQuestion(q) || (context.lastIntent === "crowding" && followUp);
-  const wantsEta = isEtaQuestion(q) || (hasRouteContext(context) && (context.lastIntent === "eta" || followUp));
+  const wantsEvents = isEventQuestion(q) || llmIntent === "events" || (context.lastIntent === "events" && (isTimeFollowUp(q) || followUp));
+  const wantsHolidays = isHolidayQuestion(q) || llmIntent === "holidays" || (context.lastIntent === "holidays" && (isTimeFollowUp(q) || followUp));
+  const wantsWeather = !wantsEvents && !wantsHolidays && (llmIntent ? llmIntent === "weather" : isWeatherQuestion(q) || (context.lastIntent === "weather" && (isTimeFollowUp(q) || followUp)));
+  const wantsTraffic = !wantsEvents && !wantsHolidays && (llmIntent ? llmIntent === "traffic" : isTrafficQuestion(q) || (context.lastIntent === "traffic" && (isTimeFollowUp(q) || followUp)));
+  const wantsDelay = llmIntent ? llmIntent === "delay" : isDelayQuestion(q) || (context.lastIntent === "delay" && followUp);
+  const wantsCrowding = llmIntent ? llmIntent === "crowding" : isCrowdingQuestion(q) || (context.lastIntent === "crowding" && followUp);
+  const wantsEta = llmIntent ? llmIntent === "eta" : isEtaQuestion(q) || (hasRouteContext(context) && (context.lastIntent === "eta" || followUp));
 
   const terminalAnswer = answerRouteTerminalQuestion(q, context);
   if (terminalAnswer) return terminalAnswer;
@@ -1495,10 +1571,17 @@ export async function askTransitAssistant(
     return answerHolidayQuestion(q, context);
   }
 
-  const destinationAnswer = await answerDestinationQuestion(q, context);
-  if (destinationAnswer) return destinationAnswer;
+  if (!llmIntent || llmIntent === "navigation") {
+    const destinationAnswer = await answerDestinationQuestion(q, context);
+    if (destinationAnswer) return destinationAnswer;
+  }
 
-  const isTransitQuestion = /bus|ttc|route|stop|station|eta|arriv|delay|late|weather|traffic|event|game|concert|show|festival|holiday|long weekend|crowd|busy|navigate|direction|trip|destination|terminal|terminus|last stop|final stop|walk|go to|get to|take me|east|west|north|south|\b\d{3}\b/i.test(q) || followUp;
+  const stopContextAnswer = await answerStopContextQuestion(q, context);
+  if (stopContextAnswer) return stopContextAnswer;
+
+  const isTransitQuestion = llmIntent
+    ? llmIntent !== "out-of-scope"
+    : /bus|ttc|route|stop|station|eta|arriv|delay|late|weather|traffic|event|game|concert|show|festival|holiday|long weekend|crowd|busy|navigate|direction|trip|destination|terminal|terminus|last stop|final stop|walk|go to|get to|take me|east|west|north|south|\b\d{3}\b/i.test(q) || followUp;
   if (!isTransitQuestion) {
     return {
       matchedIntent: "out-of-scope",
