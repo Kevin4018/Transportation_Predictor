@@ -260,6 +260,16 @@ function LeafletMap({ center, zoom, userPos, locationStatus, stops, routeLine, d
     };
   }, [transitMarkers]);
 
+  const recenterToUser = () => {
+    const map = mapRef.current;
+    if (!map || !userPos) return;
+
+    skipNextMoveEndRef.current = true;
+    lastSentCenterRef.current = userPos;
+    map.setView(userPos, Math.max(map.getZoom(), 15), { animate: false });
+    onMoveEnd?.(userPos);
+  };
+
   const locationLabel =
     locationStatus === "locating" ? "Locating..."
       : locationStatus === "denied" ? "Location permission denied"
@@ -274,6 +284,19 @@ function LeafletMap({ center, zoom, userPos, locationStatus, stops, routeLine, d
         <div className="absolute right-2 top-2 z-[1001] rounded-full bg-white/95 px-2.5 py-1 text-[11px] text-[#585858] shadow-sm">
           {locationLabel}
         </div>
+      )}
+      {userPos && (
+        <button
+          type="button"
+          onClick={recenterToUser}
+          className="absolute right-2 bottom-2 z-[1001] size-[34px] rounded-full bg-white/95 shadow-md flex items-center justify-center cursor-pointer"
+          aria-label="Recenter to my location"
+          title="Recenter to my location"
+        >
+          <div className="size-[17px]">
+            <LocateIcon />
+          </div>
+        </button>
       )}
     </div>
   );
@@ -291,6 +314,7 @@ const P = {
   close: "M1.4 14L0 12.6L5.6 7L0 1.4L1.4 0L7 5.6L12.6 0L14 1.4L8.4 7L14 12.6L12.6 14L7 8.4L1.4 14Z",
   pin: "M8 19.6C5.86667 17.7 4.25 15.9708 3.15 14.4125C2.05 12.8542 1.5 11.4 1.5 10.05C1.5 7.95 2.20417 6.22917 3.6125 4.8875C5.02083 3.54583 6.68333 2.875 8.6 2.875C10.5167 2.875 12.1792 3.54583 13.5875 4.8875C14.9958 6.22917 15.7 7.95 15.7 10.05C15.7 11.4 15.15 12.8542 14.05 14.4125C12.95 15.9708 11.3333 17.7 9.2 19.6H8ZM8.6 12.5C9.36667 12.5 10.025 12.2333 10.575 11.7C11.125 11.1667 11.4 10.5167 11.4 9.75C11.4 8.98333 11.125 8.325 10.575 7.775C10.025 7.225 9.36667 6.95 8.6 6.95C7.83333 6.95 7.17083 7.225 6.6125 7.775C6.05417 8.325 5.775 8.98333 5.775 9.75C5.775 10.5167 6.05417 11.1667 6.6125 11.7C7.17083 12.2333 7.83333 12.5 8.6 12.5Z",
   pinFill: "M8 0C5.6 0 3.6 0.85 1.975 2.55C0.658333 3.91667 0 5.51667 0 7.35C0 8.61667 0.35 9.89167 1.05 11.175C1.75 12.4583 2.59167 13.6583 3.575 14.775C4.55833 15.8917 5.525 16.8833 6.475 17.75C7.425 18.6167 8.15833 19.3333 8.675 19.9C9.19167 19.3333 9.925 18.6167 10.875 17.75C11.825 16.8833 12.7917 15.8917 13.775 14.775C14.7583 13.6583 15.5917 12.4583 16.275 11.175C16.9583 9.89167 17.3 8.61667 17.3 7.35C17.3 5.51667 16.6583 3.91667 15.375 2.55C13.75 0.85 11.75 0 9.35 0H8ZM8.675 10C7.90833 10 7.25 9.725 6.7 9.175C6.15 8.625 5.875 7.96667 5.875 7.2C5.875 6.43333 6.15 5.775 6.7 5.225C7.25 4.675 7.90833 4.4 8.675 4.4C9.44167 4.4 10.1 4.675 10.65 5.225C11.2 5.775 11.475 6.43333 11.475 7.2C11.475 7.96667 11.2 8.625 10.65 9.175C10.1 9.725 9.44167 10 8.675 10Z",
+  locate: "M10 18.5C5.30558 18.5 1.5 14.6944 1.5 10C1.5 5.30558 5.30558 1.5 10 1.5C14.6944 1.5 18.5 5.30558 18.5 10C18.5 14.6944 14.6944 18.5 10 18.5ZM10 14C12.2091 14 14 12.2091 14 10C14 7.79086 12.2091 6 10 6C7.79086 6 6 7.79086 6 10C6 12.2091 7.79086 14 10 14ZM10 11.8C9.00589 11.8 8.2 10.9941 8.2 10C8.2 9.00589 9.00589 8.2 10 8.2C10.9941 8.2 11.8 9.00589 11.8 10C11.8 10.9941 10.9941 11.8 10 11.8Z",
   car: "M16.5 13C16.5 13.4 16.35 13.7417 16.05 14.025C15.75 14.3083 15.3833 14.45 14.95 14.45H3.05C2.61667 14.45 2.25 14.3083 1.95 14.025C1.65 13.7417 1.5 13.4 1.5 13V6.5C1.5 5.16667 1.90833 4.04167 2.725 3.125C3.54167 2.20833 4.575 1.75 5.825 1.75H12.175C13.425 1.75 14.4583 2.20833 15.275 3.125C16.0917 4.04167 16.5 5.16667 16.5 6.5V13ZM4.375 10.275C4.65833 10.275 4.9 10.175 5.1 9.975C5.3 9.775 5.4 9.525 5.4 9.225C5.4 8.94167 5.3 8.7 5.1 8.5C4.9 8.3 4.65833 8.2 4.375 8.2C4.09167 8.2 3.85 8.3 3.65 8.5C3.45 8.7 3.35 8.94167 3.35 9.225C3.35 9.525 3.45 9.775 3.65 9.975C3.85 10.175 4.09167 10.275 4.375 10.275ZM13.625 10.275C13.9083 10.275 14.15 10.175 14.35 9.975C14.55 9.775 14.65 9.525 14.65 9.225C14.65 8.94167 14.55 8.7 14.35 8.5C14.15 8.3 13.9083 8.2 13.625 8.2C13.3417 8.2 13.1 8.3 12.9 8.5C12.7 8.7 12.6 8.94167 12.6 9.225C12.6 9.525 12.7 9.775 12.9 9.975C13.1 10.175 13.3417 10.275 13.625 10.275ZM3.25 6.75H14.75L13.825 3.925C13.7083 3.625 13.5167 3.38333 13.25 3.2C12.9833 3.01667 12.6917 2.925 12.375 2.925H5.625C5.30833 2.925 5.01667 3.01667 4.75 3.2C4.48333 3.38333 4.29167 3.625 4.175 3.925L3.25 6.75Z",
   dots: "M1.83333 1C1.83333 1.51667 1.64583 1.95833 1.27083 2.325C0.895833 2.69167 0.45 2.875 -0.0833333 2.875C-0.616667 2.875 -1.0625 2.69167 -1.4375 2.325C-1.8125 1.95833 -2 1.51667 -2 1C-2 0.483333 -1.8125 0.041667 -1.4375 -0.325C-1.0625 -0.691667 -0.616667 -0.875 -0.0833333 -0.875C0.45 -0.875 0.895833 -0.691667 1.27083 -0.325C1.64583 0.041667 1.83333 0.483333 1.83333 1Z",
   arrowUpRight: "M0.625 11.875L10 2.5M10 2.5H2.5M10 2.5V10",
@@ -487,6 +511,12 @@ const CarIcon = ({ fill = "#1D1B20" }: { fill?: string }) => (
 const ArrowUpRightIcon = () => (
   <svg className="block size-full" fill="none" viewBox="0 0 12.5 12.5">
     <path d={P.arrowUpRight} stroke="#1E1E1E" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" />
+  </svg>
+);
+
+const LocateIcon = () => (
+  <svg className="block size-full" viewBox="0 0 20 20" aria-hidden="true">
+    <path d={P.locate} fill="#1D1B20" />
   </svg>
 );
 
@@ -769,7 +799,7 @@ function SearchOverlay({ query, target, currentLocation, searchHistory, onQueryC
               <div className="pt-3 pb-8">
                 <div className="px-4 pb-2">
                   <p className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-[#858585] tracking-[-0.08px]">
-                    Nearby recommendations
+                    Recommendations
                   </p>
                 </div>
                 {(["Restaurants", "Attractions", "Parks", "Shopping"] as RecommendationCategory[]).map(category => {
@@ -1100,19 +1130,20 @@ function MapScreen({ stopId, showControls, mapCenter, userPos, locationStatus, o
                     <span className="font-['SF_Compact',system-ui,sans-serif] text-[14px] text-black">min.</span>
                   </div>
                 </div>
-                <div className="flex justify-between mb-3">
+                <div className="grid grid-cols-3 mb-3">
                   <OffsetItem icon={<BusIcon />}          value={displayedPrediction.offsets.schedule}     label="schedule" />
                   <OffsetItem icon={<CloudIcon />}         value={displayedPrediction.offsets.weather}      label="weather" />
                   <OffsetItem icon={<TrafficIcon />}       value={displayedPrediction.offsets.traffic}      label="traffic" />
                 </div>
-                <div className="flex justify-between mb-3">
+                <div className="grid grid-cols-3 mb-3">
                   <OffsetItem icon={<WalkIcon />}          value={displayedPrediction.offsets.accidents}    label="accidents" />
                   <OffsetItem icon={<ConstructionIcon />}  value={displayedPrediction.offsets.construction} label="construction" />
                   <OffsetItem icon={<StarIcon />}           value={displayedPrediction.offsets.events ?? 0}  label="events" />
                 </div>
-                <div className="flex justify-start gap-[24px] mb-3">
+                <div className="grid grid-cols-3 mb-3">
                   <OffsetItem icon={<StarIcon />}           value={displayedPrediction.offsets.holidays ?? 0} label="holiday" />
                   <OffsetItem icon={<StarIcon />}           value={displayedPrediction.offsets.other}         label="other" />
+                  <div aria-hidden="true" />
                 </div>
                 <button
                   onClick={() => selectedRoute !== null && dir !== null && onOpenReport(selectedRoute, dir)}
@@ -1353,11 +1384,24 @@ function DestNavScreen({ destId, mapCenter, originPos, originLabel, userPos, loc
     .filter((leg): leg is NonNullable<NavigationRoute["legs"]>[number] & { fromPos: [number, number] } =>
       (leg.mode === "BUS" || leg.mode === "STREETCAR" || leg.mode === "SUBWAY" || leg.mode === "TRANSIT") && !!leg.fromPos
     )
-    .map(leg => ({
-      pos: leg.fromPos,
-      mode: leg.mode === "STREETCAR" ? "BUS" as const : leg.mode,
-      label: leg.fromName,
-    }));
+    .flatMap(leg => {
+      const mode = leg.mode === "STREETCAR" ? "BUS" as const : leg.mode;
+      const markers = [{
+        pos: leg.fromPos,
+        mode,
+        label: `Board at ${leg.fromName}`,
+      }];
+
+      if (leg.toPos) {
+        markers.push({
+          pos: leg.toPos,
+          mode,
+          label: `Get off at ${leg.toName}`,
+        });
+      }
+
+      return markers;
+    });
   const renderLegIcon = (legMode: NavigationRoute["legs"] extends Array<infer T> ? T extends { mode: infer M } ? M : never : never) => {
     if (legMode === "WALK") return <WalkIcon />;
     if (legMode === "CAR") return <CarIcon />;
@@ -1526,11 +1570,24 @@ function NavScreen({ destId, mode, mapCenter, originPos, originLabel, userPos, l
     .filter((leg): leg is NonNullable<NavigationRoute["legs"]>[number] & { fromPos: [number, number] } =>
       (leg.mode === "BUS" || leg.mode === "STREETCAR" || leg.mode === "SUBWAY" || leg.mode === "TRANSIT") && !!leg.fromPos
     )
-    .map(leg => ({
-      pos: leg.fromPos,
-      mode: leg.mode === "STREETCAR" ? "BUS" as const : leg.mode,
-      label: leg.fromName,
-    }));
+    .flatMap(leg => {
+      const mode = leg.mode === "STREETCAR" ? "BUS" as const : leg.mode;
+      const markers = [{
+        pos: leg.fromPos,
+        mode,
+        label: `Board at ${leg.fromName}`,
+      }];
+
+      if (leg.toPos) {
+        markers.push({
+          pos: leg.toPos,
+          mode,
+          label: `Get off at ${leg.toName}`,
+        });
+      }
+
+      return markers;
+    });
   const renderNavLegIcon = (legMode: NonNullable<NavigationRoute["legs"]>[number]["mode"]) => {
     if (legMode === "WALK") return <WalkIcon />;
     if (legMode === "CAR") return <CarIcon />;
@@ -1838,14 +1895,60 @@ function AiChatbot({ appContext }: { appContext?: TransitAssistantContext }) {
             </div>
 
             <div className="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-4">
+              {messages.length === 0 && !isTyping && (
+                <div className="flex h-full flex-col justify-center gap-3 px-1 text-[#4f4f4f]">
+                  <div className="flex items-center gap-2">
+                    <MilkIcon size={34} />
+                    <div>
+                      <p className="font-['Inter',system-ui,sans-serif] text-[16px] font-semibold text-[#1e1e1e]">
+                        Ask Milk bot
+                      </p>
+                      <p className="font-['Inter',system-ui,sans-serif] text-[12px] leading-[1.35] text-[#767676]">
+                        TTC, trips, delays, weather, events, and Toronto recommendations.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      ["Arrivals", "When is the 501 at Spadina?"],
+                      ["Delays", "Why is my route slow?"],
+                      ["Traffic", "Traffic near Union"],
+                      ["Crowding", "Is the 501 crowded?"],
+                      ["Events", "Events around me"],
+                      ["Holidays", "Any holiday impact today?"],
+                      ["Navigation", "How do I get to CN Tower?"],
+                      ["Recommendation", "Restaurants near Union"],
+                      ["Guide", "Plan a half-day in Toronto"],
+                      ["Weather", "Weather near High Park"],
+                    ].map(([label, example]) => (
+                      <button
+                        key={label}
+                        type="button"
+                        onClick={() => {
+                          setInput(example);
+                          requestAnimationFrame(() => chatInputRef.current?.focus());
+                        }}
+                        className="rounded-[10px] border border-[#e1e1e1] bg-[#fafafa] px-3 py-2 text-left"
+                      >
+                        <span className="block font-['Inter',system-ui,sans-serif] text-[12px] font-semibold text-[#2f2f2f]">
+                          {label}
+                        </span>
+                        <span className="mt-0.5 block font-['Inter',system-ui,sans-serif] text-[11px] leading-[1.25] text-[#767676]">
+                          {example}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
               {messages.map((message, index) => (
                 <div key={index} className={`flex gap-2 ${message.role === "user" ? "justify-end" : "justify-start items-start"}`}>
                   {message.role === "ai" && <MilkIcon size={30} />}
                   <div
-                    className={`max-w-[75%] rounded-[8px] px-3 py-[6px] font-['Inter',system-ui,sans-serif] text-[15px] leading-[1.4] whitespace-pre-line ${
+                    className={`rounded-[8px] px-3 py-[6px] font-['Inter',system-ui,sans-serif] text-[15px] leading-[1.4] whitespace-pre-line ${
                       message.role === "user"
-                        ? "bg-[#f5f5f5] border border-[#d9d9d9] text-[#1e1e1e]"
-                        : "text-[#1e1e1e]"
+                        ? "max-w-[calc(100%-44px)] bg-[#f5f5f5] border border-[#d9d9d9] text-[#1e1e1e]"
+                        : "flex-1 min-w-0 text-[#1e1e1e]"
                     }`}
                   >
                     {formatChatDisplayText(message.role, message.text)}
@@ -2424,8 +2527,8 @@ export default function App() {
   };
 
   const originContext: TransitAssistantContext = {
-    originPos: effectiveOriginPos,
-    originLabel: effectiveOriginLabel,
+    originPos: originOverride?.pos ?? userPos ?? undefined,
+    originLabel: originOverride?.label ?? (userPos ? "Your location" : undefined),
   };
   const chatbotContext: TransitAssistantContext =
     screen.id === "map"

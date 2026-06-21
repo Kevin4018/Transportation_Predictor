@@ -7,6 +7,7 @@ export type TransitAssistantIntent =
   | "holidays"
   | "crowding"
   | "navigation"
+  | "recommendation"
   | "guide"
   | "help"
   | "out-of-scope";
@@ -15,6 +16,13 @@ export interface TransitAssistantIntentResult {
   intent: TransitAssistantIntent;
   confidence: number;
   reason?: string;
+  scope?: TransitAssistantIntentScope;
+}
+
+export interface TransitAssistantIntentScope {
+  kind: "none" | "current" | "place";
+  place?: string;
+  phrase?: string;
 }
 
 export interface TransitAssistantAnswerVerificationRequest {
@@ -38,6 +46,7 @@ export interface TransitAssistantIntentContext {
   direction?: string;
   destinationId?: string;
   lastIntent?: TransitAssistantIntent;
+  aroundScope?: TransitAssistantIntentScope;
 }
 
 const VALID_INTENTS = new Set<TransitAssistantIntent>([
@@ -49,6 +58,7 @@ const VALID_INTENTS = new Set<TransitAssistantIntent>([
   "holidays",
   "crowding",
   "navigation",
+  "recommendation",
   "guide",
   "help",
   "out-of-scope",
@@ -90,6 +100,21 @@ function normalizeIntentResult(value: unknown): TransitAssistantIntentResult {
   const record = value as Record<string, unknown>;
   const intent = record.intent;
   const confidence = Number(record.confidence);
+  const scopeRecord = record.scope && typeof record.scope === "object"
+    ? record.scope as Record<string, unknown>
+    : undefined;
+  const scopeKind = scopeRecord?.kind;
+  const scope = scopeKind === "current" || scopeKind === "place" || scopeKind === "none"
+    ? {
+      kind: scopeKind,
+      place: typeof scopeRecord?.place === "string" && scopeRecord.place.trim()
+        ? scopeRecord.place.trim()
+        : undefined,
+      phrase: typeof scopeRecord?.phrase === "string" && scopeRecord.phrase.trim()
+        ? scopeRecord.phrase.trim()
+        : undefined,
+    } satisfies TransitAssistantIntentScope
+    : undefined;
 
   if (typeof intent !== "string" || !VALID_INTENTS.has(intent as TransitAssistantIntent)) {
     throw new Error("Gemini intent response had an invalid intent");
@@ -101,6 +126,7 @@ function normalizeIntentResult(value: unknown): TransitAssistantIntentResult {
       ? Math.max(0, Math.min(100, Math.round(confidence)))
       : 60,
     reason: typeof record.reason === "string" ? record.reason : undefined,
+    scope,
   };
 }
 
@@ -183,7 +209,8 @@ export async function classifyTransitAssistantIntent(
 ): Promise<TransitAssistantIntentResult> {
   const prompt = [
     "Classify this TTC transit assistant user message into exactly one intent.",
-    "Return only JSON with this schema: {\"intent\":\"eta|delay|weather|traffic|events|holidays|crowding|navigation|guide|help|out-of-scope\",\"confidence\":0-100,\"reason\":\"short\"}.",
+    "Also identify whether the message limits the answer to an around/near/by location scope.",
+    "Return only JSON with this schema: {\"intent\":\"eta|delay|weather|traffic|events|holidays|crowding|navigation|recommendation|guide|help|out-of-scope\",\"confidence\":0-100,\"scope\":{\"kind\":\"none|current|place\",\"place\":\"place name if kind is place\",\"phrase\":\"short original scope phrase\"},\"reason\":\"short\"}.",
     "Intent meanings:",
     "- eta: arrival time, next bus/streetcar, route/stop timing.",
     "- delay: lateness, causes, accidents, construction, why slow.",
@@ -193,10 +220,17 @@ export async function classifyTransitAssistantIntent(
     "- holidays: public holidays, statutory holidays, long weekends, holiday greetings.",
     "- crowding: passenger load, seats, packed vehicles.",
     "- navigation: directions, trip planning, how to get to a destination, including messages like 'plan a trip tomorrow to CN Tower' or 'I want to go to Union at 8'.",
-    "- guide: broad travel guide, itinerary, tourism, food, restaurants, attractions, shopping, parks, date ideas, family plans, rainy-day plans, or Toronto recommendations.",
+    "- recommendation: direct requests for recommended places, restaurants, food, cafes, attractions, parks, shopping, or things to do, especially with wording like recommend, suggestions, best, any good, where to eat, restaurants around CN Tower, parks near me.",
+    "- guide: broader travel guide, itinerary, tourism plan, day plan, date ideas, family plans, rainy-day plans, or multi-stop Toronto plans.",
     "- help: transit-related but missing needed details or clarification.",
     "- out-of-scope: not about TTC transit, commuting, routing, stops, traffic, weather, events, holidays, or crowding.",
     "Use context for follow-ups like 'what about now' or 'why'.",
+    "Scope rules:",
+    "- scope only applies to weather, traffic, events, crowding, recommendation, and guide.",
+    "- Use scope.kind='current' for around me, near me, nearby me, my location, current location, or here.",
+    "- Use scope.kind='place' and place='<place name>' for around/near/by a named place, landmark, venue, area, address, stop, or station.",
+    "- Use scope.kind='none' for navigation, eta, delay, holidays, help, out-of-scope, or when no around/near/by range is present.",
+    "- Do not put the trip destination itself in scope for navigation questions.",
     `Context: ${JSON.stringify(context)}`,
     `User message: ${input}`,
   ].join("\n");
@@ -235,7 +269,7 @@ export async function verifyTransitAssistantAnswer(
   const prompt = [
     "You are checking the final answer for Milk bot, a TTC transit assistant.",
     "Decide whether the draft answer correctly answers the user and is consistent with the provided context.",
-    "Milk bot can also answer Toronto guide and itinerary questions when they are useful for local travel planning.",
+    "Milk bot can also answer Toronto recommendation, guide, and itinerary questions when they are useful for local travel planning.",
     "If the draft is correct, return it unchanged.",
     "If the draft is irrelevant, misleading, contradictory, or fails to answer a simple question, rewrite it.",
     "Do not invent precise TTC arrivals, routes, stops, weather, traffic, events, or holidays that are not present in the draft/context.",

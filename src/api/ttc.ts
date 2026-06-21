@@ -2,6 +2,7 @@ import { apiRequest } from "./request";
 import { getTrafficImpact } from "./traffic";
 import { getEventImpact, type CityEvent, type EventImpact } from "./events";
 import { getHolidayImpact, type HolidayImpact } from "./holidays";
+import { searchYelpRecommendations, type YelpRecommendation } from "./places";
 import {
   getCurrentWeather,
   getWeatherForecast,
@@ -160,6 +161,7 @@ export interface TransitAssistantContext {
   guideAudience?: string;
   guideBudget?: string;
   guideTopic?: string;
+  aroundScope?: TransitAssistantIntentScope;
 }
 
 export type TransitAssistantIntent =
@@ -171,6 +173,7 @@ export type TransitAssistantIntent =
   | "holidays"
   | "crowding"
   | "navigation"
+  | "recommendation"
   | "guide"
   | "help"
   | "out-of-scope";
@@ -182,10 +185,17 @@ export interface TransitAssistantAnswer {
   context?: TransitAssistantContext;
 }
 
+export interface TransitAssistantIntentScope {
+  kind: "none" | "current" | "place";
+  place?: string;
+  phrase?: string;
+}
+
 interface TransitAssistantIntentResult {
   intent: TransitAssistantIntent;
   confidence: number;
   reason?: string;
+  scope?: TransitAssistantIntentScope;
 }
 
 interface TransitAssistantAnswerVerificationResult {
@@ -287,6 +297,7 @@ function formatAssistantText(text: string): string {
 function applyResponsePresentation(input: string, answer: TransitAssistantAnswer): TransitAssistantAnswer {
   const language = detectResponseLanguage(input);
   const localized = localizeGuideAnswer(answer, language);
+
   return {
     ...localized,
     text: formatAssistantText(localized.text),
@@ -365,6 +376,20 @@ const GUIDE_PLACES: GuidePlace[] = [
   { name: "Dineen Coffee Co.", category: "food", area: "downtown", address: "140 Yonge St", bestFor: ["coffee", "rain", "quick"], note: "central coffee break near Queen and King", noteZh: "Queen 和 King 附近适合休息喝咖啡", noteFr: "pause café centrale près de Queen et King", indoor: true, budget: "low", destinationQuery: "Dineen Coffee Co" },
   { name: "Little Canada", category: "attractions", area: "downtown", address: "10 Dundas St E", bestFor: ["kids", "rain", "first time"], note: "indoor miniature attraction near Dundas Station", noteZh: "Dundas Station 附近的室内迷你景点", noteFr: "attraction miniature intérieure près de Dundas Station", indoor: true, budget: "medium", destinationQuery: "Little Canada Toronto" },
 ];
+
+function getDistanceKm(from: [number, number], to: [number, number]) {
+  const toRad = (value: number) => (value * Math.PI) / 180;
+  const earthRadiusKm = 6371;
+  const dLat = toRad(to[0] - from[0]);
+  const dLng = toRad(to[1] - from[1]);
+  const lat1 = toRad(from[0]);
+  const lat2 = toRad(to[0]);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+
+  return earthRadiusKm * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
 
 export function getStopMeta(stopId: string): Promise<StopMeta> {
   return apiRequest<StopMeta>(`/api/ttc/stops/${encodeURIComponent(stopId)}`);
@@ -749,6 +774,7 @@ function extractEventQuery(input: string): string | undefined {
   const cleaned = input
     .trim()
     .replace(/[?.!]+$/, "")
+    .replace(/\b(?:around|near|nearby|close\s+to|by)\s+(?:me|my\s+location|current\s+location|here)\b/gi, " ")
     .replace(/\b(?:upcoming|coming|next|soon|future|this\s+week|weekend|event|events|game|games|concert|concerts|show|shows|festival|festivals|tell\s+me|about|any|are\s+there|is\s+there|what|when|where|in\s+toronto|nearby)\b/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -763,6 +789,144 @@ function eventMatchesQuery(event: CityEvent, query: string): boolean {
   if (terms.length === 0) return true;
   const haystack = `${event.title} ${event.venueName} ${event.description} ${event.kind}`.toLowerCase();
   return terms.every(term => haystack.includes(term));
+}
+
+type AssistantLocationFocus = {
+  label: string;
+  pos?: [number, number];
+  source: "current" | "place" | "context";
+};
+
+function referencesCurrentLocation(input: string): boolean {
+  return /\b(?:around|near|nearby|close\s+to|by)\s+(?:me|my\s+location|current\s+location|here)\b/i.test(input) ||
+    /\b(?:around\s+me|near\s+me|nearby\s+me|where\s+i\s+am|from\s+here)\b/i.test(input);
+}
+
+function extractLocationFocusQuery(input: string): string | undefined {
+  const cleaned = input.trim().replace(/[?.!]+$/, "");
+  const patterns = [
+    /\b(?:around|near|nearby|close\s+to|by)\s+(.+)$/i,
+    /\b(?:restaurants?|food|events?|things?\s+to\s+do|places?)\s+(?:around|near|nearby|close\s+to|by)\s+(.+)$/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = cleaned.match(pattern);
+    const raw = match?.[1]?.trim();
+    if (!raw || /^(?:me|my\s+location|current\s+location|here)$/i.test(raw)) continue;
+    const query = raw
+      .replace(/\b(?:today|tomorrow|tonight|this\s+weekend|this\s+week|right\s+now|now)\b/gi, " ")
+      .replace(/\b(?:in\s+toronto|toronto)\b/gi, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (query.length >= 3) return query;
+  }
+
+  return undefined;
+}
+
+async function resolveAssistantLocationFocus(
+  input: string,
+  context: TransitAssistantContext,
+): Promise<AssistantLocationFocus | undefined> {
+  if (context.aroundScope?.kind === "current" && context.originPos) {
+    return {
+      label: context.originLabel ?? "your current location",
+      pos: context.originPos,
+      source: "current",
+    };
+  }
+
+  if (context.aroundScope?.kind === "place" && context.aroundScope.place) {
+    const destination = (await searchDestinations(context.aroundScope.place).catch(() => []))[0];
+    if (destination?.pos) {
+      return {
+        label: destination.name.replace(/^destination:\s*/i, ""),
+        pos: destination.pos,
+        source: "place",
+      };
+    }
+
+    return {
+      label: context.aroundScope.place,
+      source: "place",
+    };
+  }
+
+  if (referencesCurrentLocation(input) && context.originPos) {
+    return {
+      label: context.originLabel ?? "your current location",
+      pos: context.originPos,
+      source: "current",
+    };
+  }
+
+  const placeQuery = extractLocationFocusQuery(input);
+  if (placeQuery) {
+    const destination = (await searchDestinations(placeQuery).catch(() => []))[0];
+    if (destination?.pos) {
+      return {
+        label: destination.name.replace(/^destination:\s*/i, ""),
+        pos: destination.pos,
+        source: "place",
+      };
+    }
+
+    return {
+      label: placeQuery,
+      source: "place",
+    };
+  }
+
+  if (/\b(?:nearby|around|near)\b/i.test(input) && context.originPos) {
+    return {
+      label: context.originLabel ?? "your current location",
+      pos: context.originPos,
+      source: "context",
+    };
+  }
+
+  return undefined;
+}
+
+function formatLocationFocusLine(
+  focus: AssistantLocationFocus | undefined,
+  language: ResponseLanguage,
+): string {
+  if (!focus) return "";
+  if (language === "zh") return `Location focus: ${focus.label}`;
+  if (language === "fr") return `Lieu utilise : ${focus.label}`;
+  return `Location focus: ${focus.label}`;
+}
+
+function intentSupportsAroundScope(intent: TransitAssistantIntent | undefined): boolean {
+  return intent === "weather" ||
+    intent === "traffic" ||
+    intent === "events" ||
+    intent === "crowding" ||
+    intent === "recommendation" ||
+    intent === "guide";
+}
+
+function withClassifiedAroundScope(
+  context: TransitAssistantContext,
+  classifiedIntent: TransitAssistantIntentResult | undefined,
+): TransitAssistantContext {
+  if (!classifiedIntent) {
+    return context;
+  }
+
+  if (!intentSupportsAroundScope(classifiedIntent.intent) || classifiedIntent.scope?.kind === "none") {
+    return { ...context, aroundScope: undefined };
+  }
+
+  if (!classifiedIntent.scope) {
+    return context;
+  }
+
+  return {
+    ...context,
+    aroundScope: classifiedIntent.scope,
+  };
 }
 
 function isHolidayQuestion(input: string): boolean {
@@ -1345,11 +1509,15 @@ function describeEventImpact(impact: EventImpact, targetTime?: Date): string {
   return `${when}, ${delayText} Events: ${eventText}.`;
 }
 
-async function getUpcomingEventImpacts(routeId: number): Promise<EventImpact> {
+async function getUpcomingEventImpacts(
+  routeId: number,
+  focus?: AssistantLocationFocus,
+): Promise<EventImpact> {
   const checks: Promise<EventImpact | null>[] = [];
+  const [lat, lng] = focus?.pos ?? [43.6532, -79.3832];
   for (let day = 0; day <= 14; day += 1) {
-    checks.push(getEventImpact(43.6532, -79.3832, routeId, getFutureDate(day, 13).toISOString()).catch(() => null));
-    checks.push(getEventImpact(43.6532, -79.3832, routeId, getFutureDate(day, 19).toISOString()).catch(() => null));
+    checks.push(getEventImpact(lat, lng, routeId, getFutureDate(day, 13).toISOString()).catch(() => null));
+    checks.push(getEventImpact(lat, lng, routeId, getFutureDate(day, 19).toISOString()).catch(() => null));
   }
 
   const impacts = await Promise.all(checks);
@@ -1394,10 +1562,13 @@ function describeEventImpactLocalized(
   input: string,
   targetTime?: Date,
   query?: string,
+  focus?: AssistantLocationFocus,
 ): string {
   const language = detectResponseLanguage(input);
   const filteredEvents = query ? impact.events.filter(event => eventMatchesQuery(event, query)) : impact.events;
   const when = targetTime ? formatTransitTime(targetTime) : undefined;
+  const focusLine = formatLocationFocusLine(focus, language);
+  const focusPrefix = focusLine ? `${focusLine}\n\n` : "";
 
   if (impact.source !== "ticketmaster" && isUpcomingQuestion(input)) {
     if (language === "zh") {
@@ -1462,7 +1633,7 @@ function describeEventImpactLocalized(
     if (language === "fr") {
       return `Je ne vois pas de grand match, concert, festival ou événement de divertissement qui affecterait clairement la TTC${when ? ` vers ${when}` : " maintenant"}.`;
     }
-    return `I do not see nearby sports games, concerts, festivals, or large entertainment events affecting TTC arrivals${when ? ` around ${when}` : " right now"}.`;
+    return `${focusPrefix}I do not see nearby sports games, concerts, festivals, or large entertainment events affecting TTC arrivals${when ? ` around ${when}` : " right now"}.`;
   }
 
   const list = filteredEvents.slice(0, 5)
@@ -1480,7 +1651,7 @@ function describeEventImpactLocalized(
   }
 
   const title = query ? `I found these events related to "${query}":` : "Upcoming Toronto events I can see:";
-  return `${title}\n\n${list}\n\nBefore going: check tickets, entry time, and venue notices.`;
+  return `${focusPrefix}${title}\n\n${list}\n\nBefore going: check tickets, entry time, and venue notices.`;
 }
 
 function describeHolidayImpact(impact: HolidayImpact, targetTime?: Date): string {
@@ -1709,10 +1880,15 @@ function buildNavigationTripText(
 
 async function answerWeatherQuestion(input: string, context: TransitAssistantContext): Promise<TransitAssistantAnswer> {
   const targetTime = parseAssistantTargetTime(input, getTimeBase(input, context));
+  const focus = await resolveAssistantLocationFocus(input, context);
+  const [lat, lng] = focus?.pos ?? [43.6532, -79.3832];
+  const language = detectResponseLanguage(input);
+  const focusPrefix = formatLocationFocusLine(focus, language);
+  const prefix = focusPrefix ? `${focusPrefix}\n\n` : "";
 
   try {
     if (targetTime && targetTime.getTime() - Date.now() > 20 * 60 * 1000) {
-      const forecast = await getWeatherForecast(43.6532, -79.3832);
+      const forecast = await getWeatherForecast(lat, lng);
       const targetMs = targetTime.getTime();
       const closest = forecast.hours.reduce<WeatherForecastHour | undefined>((best, hour) => {
         if (!best) return hour;
@@ -1722,7 +1898,6 @@ async function answerWeatherQuestion(input: string, context: TransitAssistantCon
       }, undefined);
 
       if (!closest) {
-        const language = detectResponseLanguage(input);
         return {
           matchedIntent: "weather",
           confidence: 62,
@@ -1739,11 +1914,11 @@ async function answerWeatherQuestion(input: string, context: TransitAssistantCon
         matchedIntent: "weather",
         confidence: 84,
         context: { ...context, lastTargetTimeIso: targetTime.toISOString(), lastIntent: "weather" },
-        text: describeForecastWeatherLocalized(closest, targetTime, forecast.locationName, input),
+        text: `${prefix}${describeForecastWeatherLocalized(closest, targetTime, forecast.locationName, input)}`,
       };
     }
 
-    const weather = await getCurrentWeather(43.6532, -79.3832);
+    const weather = await getCurrentWeather(lat, lng);
     return {
       matchedIntent: "weather",
       confidence: 88,
@@ -1752,10 +1927,9 @@ async function answerWeatherQuestion(input: string, context: TransitAssistantCon
         lastTargetTimeIso: targetTime?.toISOString() ?? new Date().toISOString(),
         lastIntent: "weather",
       },
-      text: describeCurrentWeatherLocalized(weather, input),
+      text: `${prefix}${describeCurrentWeatherLocalized(weather, input)}`,
     };
   } catch {
-    const language = detectResponseLanguage(input);
     return {
       matchedIntent: "weather",
       confidence: 55,
@@ -1772,9 +1946,14 @@ async function answerWeatherQuestion(input: string, context: TransitAssistantCon
 async function answerTrafficQuestion(input: string, context: TransitAssistantContext): Promise<TransitAssistantAnswer> {
   const targetTime = parseAssistantTargetTime(input, getTimeBase(input, context));
   const routeId = findRouteInText(input) ?? context.routeId ?? 501;
+  const focus = await resolveAssistantLocationFocus(input, context);
+  const [lat, lng] = focus?.pos ?? [43.6532, -79.3832];
+  const language = detectResponseLanguage(input);
+  const focusPrefix = formatLocationFocusLine(focus, language);
+  const prefix = focusPrefix ? `${focusPrefix}\n\n` : "";
 
   try {
-    const impact = await getTrafficImpact(43.6532, -79.3832, routeId, targetTime?.toISOString());
+    const impact = await getTrafficImpact(lat, lng, routeId, targetTime?.toISOString());
 
     return {
       matchedIntent: "traffic",
@@ -1785,10 +1964,9 @@ async function answerTrafficQuestion(input: string, context: TransitAssistantCon
         lastTargetTimeIso: targetTime?.toISOString() ?? new Date().toISOString(),
         lastIntent: "traffic",
       },
-      text: describeTrafficQuestionLocalized(input, routeId, Boolean(findRouteInText(input) || context.routeId), targetTime, impact.trafficDelayMin),
+      text: `${prefix}${describeTrafficQuestionLocalized(input, routeId, Boolean(findRouteInText(input) || context.routeId), targetTime, impact.trafficDelayMin)}`,
     };
   } catch {
-    const language = detectResponseLanguage(input);
     return {
       matchedIntent: "traffic",
       confidence: 55,
@@ -1806,11 +1984,13 @@ async function answerEventQuestion(input: string, context: TransitAssistantConte
   const targetTime = parseAssistantTargetTime(input, getTimeBase(input, context));
   const routeId = findRouteInText(input) ?? context.routeId ?? 501;
   const query = extractEventQuery(input);
+  const focus = await resolveAssistantLocationFocus(input, context);
+  const [lat, lng] = focus?.pos ?? [43.6532, -79.3832];
 
   try {
     const impact = isUpcomingQuestion(input) || query
-      ? await getUpcomingEventImpacts(routeId)
-      : await getEventImpact(43.6532, -79.3832, routeId, targetTime?.toISOString());
+      ? await getUpcomingEventImpacts(routeId, focus)
+      : await getEventImpact(lat, lng, routeId, targetTime?.toISOString());
 
     return {
       matchedIntent: "events",
@@ -1821,7 +2001,7 @@ async function answerEventQuestion(input: string, context: TransitAssistantConte
         lastTargetTimeIso: targetTime?.toISOString() ?? new Date().toISOString(),
         lastIntent: "events",
       },
-      text: describeEventImpactLocalized(impact, input, targetTime, query),
+      text: describeEventImpactLocalized(impact, input, targetTime, query, focus),
     };
   } catch {
     const language = detectResponseLanguage(input);
@@ -1984,6 +2164,83 @@ function buildGuideRoute(places: GuidePlace[], profile: ReturnType<typeof getGui
   return [...selected, ...fallback];
 }
 
+function isRecommendationQuestion(input: string): boolean {
+  return /\b(?:recommend|recommendation|suggest|any|good|best|where\s+to|places?\s+to|restaurants?|food|eat|lunch|dinner|cafe|coffee|attractions?|things?\s+to\s+do|parks?|shopping|shops?|malls?)\b/i.test(input) ||
+    /(?:推荐|有没有|哪里|餐厅|美食|咖啡|景点|公园|购物|商场)/i.test(input);
+}
+
+function getRecommendationCategories(profile: ReturnType<typeof getGuideProfile>): GuideCategory[] {
+  if (profile.topic === "food") return ["food"];
+  if (profile.topic === "parks") return ["parks"];
+  if (profile.topic === "shopping") return ["shopping"];
+  if (profile.topic === "attractions") return ["attractions", "culture"];
+  if (profile.topic === "indoor") return ["attractions", "culture", "shopping", "food"];
+  if (profile.topic === "night") return ["night", "food"];
+  return ["food", "attractions", "culture", "parks", "shopping"];
+}
+
+function getYelpRecommendationQuery(profile: ReturnType<typeof getGuideProfile>) {
+  if (profile.topic === "food") return "restaurants";
+  if (profile.topic === "parks") return "parks";
+  if (profile.topic === "shopping") return "shopping";
+  if (profile.topic === "attractions") return "attractions";
+  if (profile.topic === "night") return "bars restaurants";
+  if (profile.topic === "indoor") return "indoor attractions";
+  return "restaurants attractions";
+}
+
+function formatYelpRecommendationList(items: YelpRecommendation[]) {
+  return items
+    .slice(0, 5)
+    .map((item, index) => {
+      const rating = item.rating === undefined
+        ? "rating unavailable"
+        : `${item.rating.toFixed(1)} stars${item.reviews ? `, ${item.reviews} reviews` : ""}`;
+      const meta = [
+        rating,
+        item.price,
+        item.categories.slice(0, 2).join(", "),
+      ].filter(Boolean).join(" - ");
+      const snippet = item.snippet ? `\n   Note: ${item.snippet}` : "";
+      const link = item.url ? `\n   Yelp: ${item.url}` : "";
+
+      return `${index + 1}. ${item.name}\n   ${meta}${snippet}${link}`;
+    })
+    .join("\n\n");
+}
+
+async function getGuidePlacePosition(place: GuidePlace): Promise<[number, number] | undefined> {
+  const result = (await searchDestinations(place.destinationQuery).catch(() => []))[0];
+  return result?.pos;
+}
+
+async function buildRecommendationRows(
+  places: GuidePlace[],
+  profile: ReturnType<typeof getGuideProfile>,
+  focus: AssistantLocationFocus | undefined,
+) {
+  const ranked = [...places]
+    .sort((a, b) => scoreGuidePlace(b, profile) - scoreGuidePlace(a, profile))
+    .slice(0, focus?.pos ? 8 : 5);
+
+  const withDistance = await Promise.all(ranked.map(async (place) => {
+    const pos = focus?.pos ? await getGuidePlacePosition(place) : undefined;
+    const distanceKm = focus?.pos && pos ? getDistanceKm(focus.pos, pos) : undefined;
+    return { place, distanceKm };
+  }));
+
+  return withDistance
+    .sort((a, b) => {
+      if (a.distanceKm === undefined && b.distanceKm === undefined) {
+        return scoreGuidePlace(b.place, profile) - scoreGuidePlace(a.place, profile);
+      }
+      if (a.distanceKm === undefined) return 1;
+      if (b.distanceKm === undefined) return -1;
+      return a.distanceKm - b.distanceKm;
+    })
+    .slice(0, 5);
+}
+
 function getGuideDurationLabel(duration: string, language: ResponseLanguage): string {
   const labels: Record<string, Record<ResponseLanguage, string>> = {
     "one-day": { en: "one-day", zh: "一天", fr: "une journée" },
@@ -2079,11 +2336,17 @@ function buildGuidePlaceLine(place: GuidePlace, index: number, total: number, pr
   return `${index + 1}. ${slot}: ${place.name}\n   Area: ${area}\n   Address: ${place.address}\n   Why: ${note}`;
 }
 
-function answerGuideQuestion(input: string, context: TransitAssistantContext): TransitAssistantAnswer {
+async function answerGuideQuestion(
+  input: string,
+  context: TransitAssistantContext,
+  forceRecommendation = false,
+): Promise<TransitAssistantAnswer> {
   const language = detectResponseLanguage(input);
   const shouldInheritGuideContext = context.lastIntent === "guide" &&
     !/\b(?:guide|itinerary|recommend|recommendation|suggest|things?\s+to\s+do|places?\s+to\s+(?:go|visit|eat|see)|plan\s+my\s+day)\b|(?:攻略|行程|推荐|去哪|哪里玩|玩什么)/i.test(input);
+  const focus = await resolveAssistantLocationFocus(input, context);
   const profile = getGuideProfile(input, context, shouldInheritGuideContext);
+  const recommendationCategories = getRecommendationCategories(profile);
   const candidates = GUIDE_PLACES.filter(place => {
     if (profile.topic === "food") return place.category === "food";
     if (profile.topic === "parks") return place.category === "parks";
@@ -2093,6 +2356,73 @@ function answerGuideQuestion(input: string, context: TransitAssistantContext): T
     if (profile.topic === "attractions") return place.category === "attractions" || place.category === "culture";
     return true;
   });
+  const locationLine = formatLocationFocusLine(focus, language);
+  const locationText = locationLine
+    ? `\n${locationLine}${focus?.pos ? " (using the location from the map/search context)." : " (using the closest matching place name I can find)."}`
+    : "";
+
+  if (forceRecommendation || isRecommendationQuestion(input)) {
+    const yelpLocation = focus?.source === "current" && focus.pos
+      ? `${focus.pos[0]},${focus.pos[1]}`
+      : focus?.label
+        ? `${focus.label}, Toronto, ON`
+        : undefined;
+    const yelpItems = yelpLocation
+      ? await searchYelpRecommendations({
+        query: getYelpRecommendationQuery(profile),
+        lat: focus?.source === "current" ? focus.pos?.[0] : undefined,
+        lng: focus?.source === "current" ? focus.pos?.[1] : undefined,
+        location: yelpLocation,
+      }).catch(() => [])
+      : [];
+
+    if (yelpItems.length > 0) {
+      return {
+        matchedIntent: "recommendation",
+        confidence: 90,
+        context: {
+          ...context,
+          guideArea: profile.area,
+          guideDuration: profile.duration,
+          guideAudience: profile.audience,
+          guideBudget: profile.budget,
+          guideTopic: profile.topic,
+          lastIntent: "recommendation",
+        },
+        text: `I found these Yelp recommendations:${locationText}\n\n${formatYelpRecommendationList(yelpItems)}\n\nSource: Yelp via SerpApi. Check hours and availability before going.`,
+      };
+    }
+
+    const recommendationPlaces = GUIDE_PLACES.filter(place => recommendationCategories.includes(place.category));
+    const rows = await buildRecommendationRows(recommendationPlaces, profile, focus);
+    const title =
+      profile.topic === "food" ? "restaurant and food recommendations" :
+      profile.topic === "parks" ? "park recommendations" :
+      profile.topic === "shopping" ? "shopping recommendations" :
+      profile.topic === "attractions" ? "attraction recommendations" :
+      "Toronto recommendations";
+    const list = rows
+      .map(({ place, distanceKm }, index) => {
+        const distanceText = distanceKm === undefined ? "" : `\n   Distance from focus: ${distanceKm.toFixed(1)} km`;
+        return `${index + 1}. ${place.name}\n   ${place.address}${distanceText}\n   Why: ${place.note}`;
+      })
+      .join("\n\n");
+
+    return {
+      matchedIntent: "recommendation",
+      confidence: 88,
+      context: {
+        ...context,
+        guideArea: profile.area,
+        guideDuration: profile.duration,
+        guideAudience: profile.audience,
+        guideBudget: profile.budget,
+        guideTopic: profile.topic,
+        lastIntent: "recommendation",
+      },
+      text: `Here are ${title}:${locationText}\n\n${list}\n\nBefore going: I do not have live ratings in the current map data yet, so check hours, reservations, and recent reviews before you go.`,
+    };
+  }
   const route = buildGuideRoute(candidates, profile);
   const routeText = route
     .map((place, index) => buildGuidePlaceLine(place, index, route.length, profile, language))
@@ -2147,7 +2477,7 @@ function answerGuideQuestion(input: string, context: TransitAssistantContext): T
       guideTopic: profile.topic,
       lastIntent: "guide",
     },
-    text: `${intro}\n${fitLine}\n\n${planLabel}\n${routeText}${budgetText}\n\n${transitHint}\n\n${beforeGoing}${navigationHint}`,
+    text: `${intro}\n${fitLine}${locationText}\n\n${planLabel}\n${routeText}${budgetText}\n\n${transitHint}\n\n${beforeGoing}${navigationHint}`,
   };
 }
 
@@ -2401,7 +2731,9 @@ async function answerLocationQuestion(
     matchedIntent: "help",
     confidence: 88,
     context,
-    text: `I cannot see your exact location from chat unless browser location is allowed.${stopText || " The map is currently using the app's default Toronto context."}`,
+    text: context.originPos
+      ? `I can use ${context.originLabel ?? "your current location"} from the map context for nearby TTC, events, restaurants, and navigation questions.${stopText}`
+      : `I cannot see your exact location from chat unless browser location is allowed.${stopText || " The map is currently using the app's default Toronto context."}`,
   };
 }
 
@@ -2618,7 +2950,9 @@ async function buildTransitAssistantAnswer(
 
   const classifiedIntent = await classifyTransitAssistantIntent(q, context);
   const llmIntent = classifiedIntent?.intent;
-  const wantsGuide = isGuideQuestion(q) || llmIntent === "guide" || isGuideFollowUp(q, context);
+  const scopedContext = withClassifiedAroundScope(context, classifiedIntent);
+  const wantsRecommendation = llmIntent === "recommendation";
+  const wantsGuide = wantsRecommendation || isGuideQuestion(q) || llmIntent === "guide" || isGuideFollowUp(q, context);
   const destinationQueryForNavigation = extractDestinationQuery(q);
   const navigationVerbRequested = /\b(?:navigate|directions?|route\s+me|get\s+me|take\s+me|how\s+(?:do|can|should)\s+i\s+get|how\s+to\s+get|go\s+to|travel\s+to|transit\s+to|trip\s+to)\b/i.test(q);
   const explicitNavigationQuestion =
@@ -2627,48 +2961,48 @@ async function buildTransitAssistantAnswer(
     (llmIntent === "navigation" && (destinationQueryForNavigation !== undefined || (context.destinationId && isDestinationFollowUp(q))));
 
   if (wantsGuide) {
-    return answerGuideQuestion(q, context);
+    return await answerGuideQuestion(q, scopedContext, wantsRecommendation);
   }
 
   if (explicitNavigationQuestion) {
-    const destinationAnswer = await answerDestinationQuestion(q, context);
+    const destinationAnswer = await answerDestinationQuestion(q, scopedContext);
     if (destinationAnswer) return destinationAnswer;
   }
 
-  const followUp = isGenericFollowUp(q) && hasAssistantContext(context);
-  const wantsEvents = isEventQuestion(q) || llmIntent === "events" || (context.lastIntent === "events" && (isTimeFollowUp(q) || followUp));
-  const wantsHolidays = !explicitNavigationQuestion && (isHolidayQuestion(q) || llmIntent === "holidays" || (context.lastIntent === "holidays" && (isTimeFollowUp(q) || followUp)));
-  const wantsWeather = !wantsEvents && !wantsHolidays && (llmIntent ? llmIntent === "weather" : isWeatherQuestion(q) || (context.lastIntent === "weather" && (isTimeFollowUp(q) || followUp)));
-  const wantsTraffic = !wantsEvents && !wantsHolidays && (llmIntent ? llmIntent === "traffic" : isTrafficQuestion(q) || (context.lastIntent === "traffic" && (isTimeFollowUp(q) || followUp)));
-  const wantsDelay = llmIntent ? llmIntent === "delay" : isDelayQuestion(q) || (context.lastIntent === "delay" && followUp);
-  const wantsCrowding = llmIntent ? llmIntent === "crowding" : isCrowdingQuestion(q) || (context.lastIntent === "crowding" && followUp);
-  const wantsEta = llmIntent ? llmIntent === "eta" : isEtaQuestion(q) || (hasRouteContext(context) && (context.lastIntent === "eta" || followUp));
+  const followUp = isGenericFollowUp(q) && hasAssistantContext(scopedContext);
+  const wantsEvents = isEventQuestion(q) || llmIntent === "events" || (scopedContext.lastIntent === "events" && (isTimeFollowUp(q) || followUp));
+  const wantsHolidays = !explicitNavigationQuestion && (isHolidayQuestion(q) || llmIntent === "holidays" || (scopedContext.lastIntent === "holidays" && (isTimeFollowUp(q) || followUp)));
+  const wantsWeather = !wantsEvents && !wantsHolidays && (llmIntent ? llmIntent === "weather" : isWeatherQuestion(q) || (scopedContext.lastIntent === "weather" && (isTimeFollowUp(q) || followUp)));
+  const wantsTraffic = !wantsEvents && !wantsHolidays && (llmIntent ? llmIntent === "traffic" : isTrafficQuestion(q) || (scopedContext.lastIntent === "traffic" && (isTimeFollowUp(q) || followUp)));
+  const wantsDelay = llmIntent ? llmIntent === "delay" : isDelayQuestion(q) || (scopedContext.lastIntent === "delay" && followUp);
+  const wantsCrowding = llmIntent ? llmIntent === "crowding" : isCrowdingQuestion(q) || (scopedContext.lastIntent === "crowding" && followUp);
+  const wantsEta = llmIntent ? llmIntent === "eta" : isEtaQuestion(q) || (hasRouteContext(scopedContext) && (scopedContext.lastIntent === "eta" || followUp));
 
   const terminalAnswer = answerRouteTerminalQuestion(q, context);
   if (terminalAnswer) return terminalAnswer;
 
   if (wantsWeather) {
-    return answerWeatherQuestion(q, context);
+    return answerWeatherQuestion(q, scopedContext);
   }
 
   if (wantsTraffic && !wantsCrowding) {
-    return answerTrafficQuestion(q, context);
+    return answerTrafficQuestion(q, scopedContext);
   }
 
   if (wantsEvents && !wantsCrowding) {
-    return answerEventQuestion(q, context);
+    return answerEventQuestion(q, scopedContext);
   }
 
   if (wantsHolidays && !wantsCrowding) {
-    return answerHolidayQuestion(q, context);
+    return answerHolidayQuestion(q, scopedContext);
   }
 
   if (!llmIntent || llmIntent === "navigation") {
-    const destinationAnswer = await answerDestinationQuestion(q, context);
+    const destinationAnswer = await answerDestinationQuestion(q, scopedContext);
     if (destinationAnswer) return destinationAnswer;
   }
 
-  const stopContextAnswer = await answerStopContextQuestion(q, context);
+  const stopContextAnswer = await answerStopContextQuestion(q, scopedContext);
   if (stopContextAnswer) return stopContextAnswer;
 
   const isTransitQuestion = llmIntent
@@ -2717,7 +3051,7 @@ async function buildTransitAssistantAnswer(
       };
     }
 
-    const { prediction, context: nextContext } = await pickAssistantPrediction(q, context);
+    const { prediction, context: nextContext } = await pickAssistantPrediction(q, scopedContext);
     const { confidence, summary } = describePredictionLocalized(prediction, q);
     const stopName = prediction.stopName.replace(/[.]+$/, "");
     const language = detectResponseLanguage(q);
@@ -2744,15 +3078,18 @@ async function buildTransitAssistantAnswer(
     }
 
     if (wantsCrowding) {
+      const focus = await resolveAssistantLocationFocus(q, scopedContext);
+      const focusPrefix = formatLocationFocusLine(focus, language);
+      const prefix = focusPrefix ? `${focusPrefix}\n\n` : "";
       return {
         matchedIntent: "crowding",
         confidence,
-        context: { ...nextContext, lastIntent: "crowding" },
+        context: { ...nextContext, aroundScope: scopedContext.aroundScope, lastIntent: "crowding" },
         text: language === "zh"
           ? "我现在无法检查车厢拥挤程度。\n\n我仍然可以回答到站时间、延误、天气、交通、事故和施工。"
           : language === "fr"
             ? "Je ne peux pas vérifier l'achalandage maintenant.\n\nJe peux quand même répondre sur les arrivées, retards, météo, circulation, accidents et travaux."
-            : "I cannot check crowding right now. I can still answer arrival times, delays, weather, traffic, accidents, and construction.",
+            : `${prefix}I cannot check crowding right now. I can still answer arrival times, delays, weather, traffic, accidents, and construction.`,
       };
     }
 
@@ -2868,7 +3205,7 @@ export async function askTransitAssistant(
   context: TransitAssistantContext = {},
 ): Promise<TransitAssistantAnswer> {
   const draft = await buildTransitAssistantAnswer(input, context);
-  if (draft.matchedIntent === "guide") {
+  if (draft.matchedIntent === "guide" || draft.matchedIntent === "recommendation") {
     return applyResponsePresentation(input, draft);
   }
   const verified = await verifyTransitAssistantAnswer(input.trim(), draft);
