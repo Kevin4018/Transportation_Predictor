@@ -590,9 +590,15 @@ const getHeadsignScore = (headsign: string) => {
 const pickRepresentativeHeadsigns = (rawHeadsigns: string[]) => {
   const cleanedHeadsigns = [...new Set(rawHeadsigns.map(cleanHeadsign).filter(Boolean))]
     .sort((a, b) => getHeadsignScore(a) - getHeadsignScore(b));
+  const hasSpecificDirection = cleanedHeadsigns.some((headsign) =>
+    /^(North|South|East|West)(?:bound)?\b/i.test(headsign),
+  );
+  const candidateHeadsigns = hasSpecificDirection
+    ? cleanedHeadsigns.filter((headsign) => !/^(Inbound|Outbound)\b/i.test(headsign))
+    : cleanedHeadsigns;
   const byCardinal = new Map<string, string[]>();
 
-  cleanedHeadsigns.forEach((headsign) => {
+  candidateHeadsigns.forEach((headsign) => {
     const cardinal = getHeadsignCardinal(headsign);
     byCardinal.set(cardinal, [...(byCardinal.get(cardinal) ?? []), headsign]);
   });
@@ -605,7 +611,7 @@ const pickRepresentativeHeadsigns = (rawHeadsigns: string[]) => {
     if (candidate && !picked.includes(candidate)) picked.push(candidate);
   });
 
-  cleanedHeadsigns.forEach((headsign) => {
+  candidateHeadsigns.forEach((headsign) => {
     if (picked.length >= 2) return;
     if (!picked.includes(headsign)) picked.push(headsign);
   });
