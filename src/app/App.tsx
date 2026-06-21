@@ -343,13 +343,11 @@ function estimateWeatherDelay(weather: CurrentWeather): number {
 }
 
 function describeWeatherDelay(weather: CurrentWeather, delay: number): string {
-  const source = weather.source === "weatherapi" ? "WeatherAPI" : "mock weather data";
-
   if (delay === 0) {
-    return `${source} reports ${weather.condition.toLowerCase()}, ${weather.temperatureC} C, wind ${weather.windKph} km/h. No weather delay is expected.`;
+    return `Current weather is ${weather.condition.toLowerCase()}, ${weather.temperatureC} C, with wind ${weather.windKph} km/h. No weather delay is expected.`;
   }
 
-  return `${source} reports ${weather.condition.toLowerCase()}, ${weather.temperatureC} C, wind ${weather.windKph} km/h. Current conditions may add about ${delay} min to this trip.`;
+  return `Current weather is ${weather.condition.toLowerCase()}, ${weather.temperatureC} C, with wind ${weather.windKph} km/h. Current conditions may add about ${delay} min to this trip.`;
 }
 
 function describeTrafficDelay(impact: TrafficImpact, key: "traffic" | "accident" | "construction") {
@@ -368,9 +366,7 @@ function describeConstructionDelay(impact: ConstructionImpact) {
   const event = impact.events[0];
 
   if (!event) {
-    return impact.source === "geojson"
-      ? "No nearby road reconstruction projects are listed in the static dataset."
-      : "No construction dataset is configured yet.";
+    return "No nearby construction activity is expected to affect this route.";
   }
 
   return `${event.title}. ${event.description} (${event.distanceKm.toFixed(1)} km away).`;
@@ -378,26 +374,22 @@ function describeConstructionDelay(impact: ConstructionImpact) {
 
 function describeEventDelay(impact: EventImpact) {
   const event = impact.events[0];
-  const source = impact.source === "ticketmaster" ? "Ticketmaster event data" : "Toronto venue pressure estimate";
 
   if (!event) {
-    return impact.source === "ticketmaster"
-      ? "No nearby sports games, concerts, or major entertainment events are showing in the event feed for this trip window."
-      : "No major Toronto venue pressure is expected for this trip window.";
+    return "No nearby sports games, concerts, or major entertainment events are expected to affect this trip window.";
   }
 
-  return `${source}: ${event.description} (${event.distanceKm.toFixed(1)} km away).`;
+  return `${event.description} (${event.distanceKm.toFixed(1)} km away).`;
 }
 
 function describeHolidayDelay(impact: HolidayImpact) {
   const holiday = impact.holidays[0];
-  const source = impact.source === "nager" ? "Nager.Date holiday data" : "local holiday fallback";
 
   if (!holiday) {
     return "No Ontario public holiday is detected for this trip date.";
   }
 
-  return `${source}: ${impact.description}`;
+  return impact.description;
 }
 
 function estimateConfidenceFromFactors(factors: BusReportData["factors"]) {
@@ -525,25 +517,163 @@ function directionTextClass(label: string) {
 // ── Search overlay ──
 type SearchTarget = "general" | "origin" | "destination";
 type OriginSelection = { label: string; pos: [number, number] };
+type SearchRow = { id: string; type: "stop" | "dest"; title: string; subtitle: string; distance: string; pos?: [number, number] };
+type SearchHistoryItem = Omit<SearchRow, "type"> & { type: "stop" | "dest" | "origin"; savedAt: number };
+type RecommendationCategory = "Restaurants" | "Attractions" | "Parks" | "Shopping";
+type DestinationRecommendation = {
+  category: RecommendationCategory;
+  name: string;
+  address: string;
+  pos: [number, number];
+};
+
+const DESTINATION_RECOMMENDATIONS: DestinationRecommendation[] = [
+  { category: "Restaurants", name: "Kensington Market", address: "Kensington Ave, Toronto, ON", pos: [43.6548, -79.4004] },
+  { category: "Restaurants", name: "St. Lawrence Market", address: "93 Front St E, Toronto, ON", pos: [43.6487, -79.3716] },
+  { category: "Restaurants", name: "Chinatown", address: "Spadina Ave, Toronto, ON", pos: [43.6538, -79.3986] },
+  { category: "Restaurants", name: "Queen West Restaurants", address: "Queen St W, Toronto, ON", pos: [43.6488, -79.3998] },
+  { category: "Attractions", name: "CN Tower", address: "290 Bremner Blvd, Toronto, ON", pos: [43.6426, -79.3871] },
+  { category: "Attractions", name: "Ripley's Aquarium of Canada", address: "288 Bremner Blvd, Toronto, ON", pos: [43.6424, -79.3860] },
+  { category: "Attractions", name: "Royal Ontario Museum", address: "100 Queens Park, Toronto, ON", pos: [43.6677, -79.3948] },
+  { category: "Attractions", name: "Art Gallery of Ontario", address: "317 Dundas St W, Toronto, ON", pos: [43.6536, -79.3925] },
+  { category: "Parks", name: "Toronto Islands Ferry", address: "Jack Layton Ferry Terminal, Toronto, ON", pos: [43.6408, -79.3759] },
+  { category: "Parks", name: "Trinity Bellwoods Park", address: "790 Queen St W, Toronto, ON", pos: [43.6476, -79.4133] },
+  { category: "Parks", name: "High Park", address: "1873 Bloor St W, Toronto, ON", pos: [43.6465, -79.4637] },
+  { category: "Shopping", name: "CF Toronto Eaton Centre", address: "220 Yonge St, Toronto, ON", pos: [43.6544, -79.3807] },
+  { category: "Shopping", name: "Yorkville Village", address: "55 Avenue Rd, Toronto, ON", pos: [43.6717, -79.3940] },
+];
+
+const getDistanceKm = (from: [number, number], to: [number, number]) => {
+  const toRad = (value: number) => value * Math.PI / 180;
+  const earthRadiusKm = 6371;
+  const dLat = toRad(to[0] - from[0]);
+  const dLng = toRad(to[1] - from[1]);
+  const lat1 = toRad(from[0]);
+  const lat2 = toRad(to[0]);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+  return earthRadiusKm * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+};
+
+const encodeGeoDestinationId = (recommendation: DestinationRecommendation) => {
+  const destination = {
+    name: recommendation.name,
+    address: recommendation.address,
+    lat: recommendation.pos[0],
+    lng: recommendation.pos[1],
+    distance: recommendation.category,
+  };
+  const json = JSON.stringify(destination);
+  const bytes = new TextEncoder().encode(json);
+  let binary = "";
+  bytes.forEach(byte => { binary += String.fromCharCode(byte); });
+  return `geo:${btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")}`;
+};
+
+type StoredUser = {
+  username: string;
+  passwordHash: string;
+  searchHistory: SearchHistoryItem[];
+};
+
+const USERS_STORAGE_KEY = "transportation-predictor-users";
+const SESSION_STORAGE_KEY = "transportation-predictor-session";
+const MAX_SEARCH_HISTORY = 8;
+const USERNAME_MIN_LENGTH = 3;
+const USERNAME_MAX_LENGTH = 24;
+const PASSWORD_MIN_LENGTH = 8;
+const PASSWORD_MAX_LENGTH = 64;
+
+const readStoredUsers = (): StoredUser[] => {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(USERS_STORAGE_KEY) ?? "[]") as StoredUser[];
+    return Array.isArray(parsed)
+      ? parsed.filter(user => typeof user.username === "string" && typeof user.passwordHash === "string")
+      : [];
+  } catch {
+    return [];
+  }
+};
+
+const writeStoredUsers = (users: StoredUser[]) => {
+  window.localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(users));
+};
+
+const readStoredSession = () => {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(SESSION_STORAGE_KEY) ?? "null") as { username?: string } | null;
+    return parsed?.username ?? null;
+  } catch {
+    return null;
+  }
+};
+
+const writeStoredSession = (username: string | null) => {
+  if (!username) {
+    window.localStorage.removeItem(SESSION_STORAGE_KEY);
+    return;
+  }
+  window.localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify({ username }));
+};
+
+const hashPassword = async (username: string, password: string) => {
+  const data = new TextEncoder().encode(`${username.trim().toLowerCase()}:${password}`);
+  const digest = await window.crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(digest))
+    .map(byte => byte.toString(16).padStart(2, "0"))
+    .join("");
+};
 
 interface SearchOverlayProps {
   query: string;
   target: SearchTarget;
   currentLocation: OriginSelection | null;
+  searchHistory: SearchHistoryItem[];
   onQueryChange: (q: string) => void;
   onClose: () => void;
   onSelectStop: (id: string) => void;
   onSelectDest: (id: string) => void;
   onSelectOrigin: (origin: OriginSelection) => void;
   onSelectCurrentLocation: () => void;
+  onRememberSearch: (item: Omit<SearchHistoryItem, "savedAt">) => void;
+  onSelectHistory: (item: SearchHistoryItem) => void;
 }
-function SearchOverlay({ query, target, currentLocation, onQueryChange, onClose, onSelectStop, onSelectDest, onSelectOrigin, onSelectCurrentLocation }: SearchOverlayProps) {
+function SearchOverlay({ query, target, currentLocation, searchHistory, onQueryChange, onClose, onSelectStop, onSelectDest, onSelectOrigin, onSelectCurrentLocation, onRememberSearch, onSelectHistory }: SearchOverlayProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => { inputRef.current?.focus(); }, []);
 
-  type Row = { id: string; type: "stop" | "dest"; title: string; subtitle: string; distance: string; pos?: [number, number] };
-  const [results, setResults] = useState<Row[]>([]);
+  const [results, setResults] = useState<SearchRow[]>([]);
   const [loading, setLoading] = useState(false);
+  const recommendationOrigin = currentLocation?.pos ?? TORONTO;
+  const recommendationRows = DESTINATION_RECOMMENDATIONS
+    .map(recommendation => ({
+      ...recommendation,
+      id: encodeGeoDestinationId(recommendation),
+      distanceKm: getDistanceKm(recommendationOrigin, recommendation.pos),
+    }))
+    .sort((a, b) => a.distanceKm - b.distanceKm);
+  const groupedRecommendations = recommendationRows.reduce<Record<RecommendationCategory, typeof recommendationRows>>((groups, recommendation) => {
+    const existing = groups[recommendation.category] ?? [];
+    if (existing.length < 3) {
+      groups[recommendation.category] = [...existing, recommendation];
+    }
+    return groups;
+  }, {} as Record<RecommendationCategory, typeof recommendationRows>);
+  const showRecommendations = query.trim().length === 0 && target !== "origin";
+  const visibleHistory = query.trim().length === 0
+    ? searchHistory.filter(item => {
+      if (target === "origin") return item.type === "origin";
+      if (target === "destination") return item.type === "dest";
+      return true;
+    }).slice(0, 5)
+    : [];
+  const categoryIcon: Record<RecommendationCategory, string> = {
+    Restaurants: "🍜",
+    Attractions: "📍",
+    Parks: "🌳",
+    Shopping: "🛍️",
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -560,7 +690,7 @@ function SearchOverlay({ query, target, currentLocation, onQueryChange, onClose,
 
     searchPromise.then(([stops, dests]) => {
       if (cancelled) return;
-      const rows: Row[] = [
+      const rows: SearchRow[] = [
         ...stops.map(s => ({ id: s.id, type: "stop" as const, title: s.name, subtitle: s.routes, distance: s.distance, pos: s.pos })),
         ...dests.map(d => ({ id: d.id, type: "dest" as const, title: d.name, subtitle: d.address, distance: d.distance, pos: d.pos })),
       ];
@@ -604,6 +734,83 @@ function SearchOverlay({ query, target, currentLocation, onQueryChange, onClose,
           </div>
         ) : (
           <>
+            {visibleHistory.length > 0 && (
+              <div className="pt-3">
+                <div className="px-4 pb-2">
+                  <p className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-[#858585] tracking-[-0.08px]">
+                    Recent searches
+                  </p>
+                </div>
+                {visibleHistory.map(item => (
+                  <button
+                    key={`${item.type}-${item.id}-${item.savedAt}`}
+                    onClick={() => onSelectHistory(item)}
+                    className="w-full flex items-start gap-3 px-4 py-3 border-b border-[#ececec] bg-white hover:bg-gray-50 text-left"
+                  >
+                    <div className="size-[24px] shrink-0 mt-0.5">
+                      {item.type === "stop" ? <BusIcon /> : <PinIcon />}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="font-['SF_Compact',system-ui,sans-serif] text-[17px] text-black tracking-[-0.08px] truncate">{item.title}</p>
+                      <p className="font-['SF_Compact',system-ui,sans-serif] text-[12px] text-[#858585] tracking-[-0.08px] truncate">{item.subtitle}</p>
+                    </div>
+                    <div className="flex flex-col items-end shrink-0 gap-1">
+                      <div className="size-[18px]"><ArrowUpRightIcon /></div>
+                      <span className="font-['SF_Compact',system-ui,sans-serif] text-[12px] text-[#858585]">{item.distance}</span>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+            {showRecommendations && (
+              <div className="pt-3 pb-8">
+                <div className="px-4 pb-2">
+                  <p className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-[#858585] tracking-[-0.08px]">
+                    Nearby recommendations
+                  </p>
+                </div>
+                {(["Restaurants", "Attractions", "Parks", "Shopping"] as RecommendationCategory[]).map(category => {
+                  const items = groupedRecommendations[category] ?? [];
+                  if (items.length === 0) return null;
+
+                  return (
+                    <div key={category} className="mb-3">
+                      <div className="px-4 py-1 flex items-center gap-2">
+                        <span className="text-[18px] leading-none">{categoryIcon[category]}</span>
+                        <p className="font-['SF_Compact',system-ui,sans-serif] text-[15px] text-black tracking-[-0.08px]">{category}</p>
+                      </div>
+                      {items.map(item => (
+                        <button
+                          key={item.id}
+                          onClick={() => {
+                            onRememberSearch({
+                              id: item.id,
+                              type: "dest",
+                              title: item.name,
+                              subtitle: item.address,
+                              distance: `${item.distanceKm.toFixed(1)} km`,
+                              pos: item.pos,
+                            });
+                            onSelectDest(item.id);
+                          }}
+                          className="w-full flex items-start gap-3 px-4 py-3 border-b border-[#ececec] bg-white hover:bg-gray-50 text-left"
+                        >
+                          <div className="size-[24px] shrink-0 mt-0.5"><PinIcon /></div>
+                          <div className="flex-1 min-w-0">
+                            <p className="font-['SF_Compact',system-ui,sans-serif] text-[17px] text-black tracking-[-0.08px] truncate">{item.name}</p>
+                            <p className="font-['SF_Compact',system-ui,sans-serif] text-[12px] text-[#858585] tracking-[-0.08px] truncate">{item.address}</p>
+                          </div>
+                          <div className="flex flex-col items-end shrink-0 gap-1">
+                            <div className="size-[18px]"><ArrowUpRightIcon /></div>
+                            <span className="font-['SF_Compact',system-ui,sans-serif] text-[12px] text-[#858585]">{item.distanceKm.toFixed(1)} km</span>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
             {target === "origin" && currentLocation && (
               <button
                 onClick={onSelectCurrentLocation}
@@ -621,9 +828,16 @@ function SearchOverlay({ query, target, currentLocation, onQueryChange, onClose,
                 key={r.id}
                 onClick={() => {
                   if (target === "origin" && r.pos) {
-                    onSelectOrigin({ label: r.title.replace(/^(bus stop|destination):\s*/i, ""), pos: r.pos });
+                    const label = r.title.replace(/^(bus stop|destination):\s*/i, "");
+                    onRememberSearch({
+                      ...r,
+                      type: "origin",
+                      title: label,
+                    });
+                    onSelectOrigin({ label, pos: r.pos });
                     return;
                   }
+                  onRememberSearch(r);
                   r.type === "stop" ? onSelectStop(r.id) : onSelectDest(r.id);
                 }}
                 className="w-full flex items-start gap-3 px-4 py-3 border-b border-[#c7c7c7] bg-white hover:bg-gray-50 text-left"
@@ -1622,6 +1836,163 @@ function AiChatbot({ appContext }: { appContext?: TransitAssistantContext }) {
   );
 }
 
+type AuthMode = "login" | "signup";
+
+interface AccountControlProps {
+  currentUser: StoredUser | null;
+  onLogin: (username: string, password: string) => Promise<string | null>;
+  onSignup: (username: string, password: string) => Promise<string | null>;
+  onLogout: () => void;
+}
+
+function AccountControl({ currentUser, onLogin, onSignup, onLogout }: AccountControlProps) {
+  const [open, setOpen] = useState(false);
+  const [mode, setMode] = useState<AuthMode>("login");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [message, setMessage] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const submit = async () => {
+    const cleanedUsername = username.trim();
+    if (!cleanedUsername || !password) {
+      setMessage("Enter a username and password.");
+      return;
+    }
+
+    setSubmitting(true);
+    setMessage("");
+    const error = mode === "login"
+      ? await onLogin(cleanedUsername, password)
+      : await onSignup(cleanedUsername, password);
+    setSubmitting(false);
+
+    if (error) {
+      setMessage(error);
+      return;
+    }
+
+    setUsername("");
+    setPassword("");
+    setOpen(false);
+  };
+
+  const switchMode = (nextMode: AuthMode) => {
+    setMode(nextMode);
+    setMessage("");
+  };
+
+  return (
+    <>
+      <div className="absolute right-3 top-2 z-[1500]">
+        {currentUser ? (
+          <div className="flex items-center gap-2 bg-white/95 border border-[#d9d9d9] rounded-full shadow-sm px-2 py-1">
+            <span className="max-w-[92px] truncate font-['SF_Compact',system-ui,sans-serif] text-[12px] text-[#1e1e1e]">
+              {currentUser.username}
+            </span>
+            <button
+              onClick={onLogout}
+              className="font-['SF_Compact',system-ui,sans-serif] text-[12px] text-[#007AFF]"
+            >
+              Logout
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => {
+              setMode("login");
+              setMessage("");
+              setOpen(true);
+            }}
+            className="bg-white/95 border border-[#d9d9d9] rounded-full shadow-sm px-3 py-1 font-['SF_Compact',system-ui,sans-serif] text-[12px] text-[#007AFF]"
+          >
+            Login
+          </button>
+        )}
+      </div>
+
+      {open && (
+        <div className="absolute inset-0 z-[2200] bg-black/20 flex items-center justify-center px-6">
+          <div className="w-full bg-white rounded-[16px] shadow-[0px_8px_24px_rgba(0,0,0,0.2)] border border-[#e5e5e5] p-5">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <p className="font-['SF_Compact',system-ui,sans-serif] text-[20px] text-black tracking-[-0.08px]">
+                  {mode === "login" ? "Login" : "Sign up"}
+                </p>
+                <p className="font-['SF_Compact',system-ui,sans-serif] text-[12px] text-[#858585] mt-1">
+                  Save recent searches on this device.
+                </p>
+              </div>
+              <button
+                onClick={() => setOpen(false)}
+                className="size-8 flex items-center justify-center rounded-full bg-[#f5f5f5]"
+                aria-label="Close account dialog"
+              >
+                <CloseIcon />
+              </button>
+            </div>
+
+            <div className="flex bg-[rgba(120,120,128,0.16)] rounded-[10px] p-1 mb-4">
+              {(["login", "signup"] as AuthMode[]).map(option => (
+                <button
+                  key={option}
+                  onClick={() => switchMode(option)}
+                  className={`flex-1 h-8 rounded-[8px] font-['SF_Compact',system-ui,sans-serif] text-[13px] ${
+                    mode === option ? "bg-white text-black shadow-sm" : "text-[#585858]"
+                  }`}
+                >
+                  {option === "login" ? "Login" : "Sign up"}
+                </button>
+              ))}
+            </div>
+
+            <div className="flex flex-col gap-3">
+              <input
+                value={username}
+                onChange={event => setUsername(event.target.value)}
+                placeholder="Username"
+                autoComplete="username"
+                className="h-11 rounded-[10px] border border-[#d9d9d9] px-3 font-['SF_Compact',system-ui,sans-serif] text-[15px] outline-none"
+              />
+              <input
+                value={password}
+                onChange={event => setPassword(event.target.value)}
+                onKeyDown={event => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    submit();
+                  }
+                }}
+                placeholder="Password"
+                autoComplete={mode === "login" ? "current-password" : "new-password"}
+                type="password"
+                className="h-11 rounded-[10px] border border-[#d9d9d9] px-3 font-['SF_Compact',system-ui,sans-serif] text-[15px] outline-none"
+              />
+              {mode === "signup" && (
+                <p className="font-['SF_Compact',system-ui,sans-serif] text-[12px] text-[#858585] leading-[1.35]">
+                  Username must be {USERNAME_MIN_LENGTH}-{USERNAME_MAX_LENGTH} characters. Password must be {PASSWORD_MIN_LENGTH}-{PASSWORD_MAX_LENGTH} characters.
+                </p>
+              )}
+              {message && (
+                <p className="font-['SF_Compact',system-ui,sans-serif] text-[12px] text-[#d32f2f]">
+                  {message}
+                </p>
+              )}
+              <button
+                onClick={submit}
+                disabled={submitting}
+                className="h-11 rounded-[10px] bg-[#007AFF] disabled:bg-[#a6cfff] text-white font-['SF_Compact',system-ui,sans-serif] text-[15px]"
+              >
+                {submitting ? "Working..." : mode === "login" ? "Login" : "Create account"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 // ─── App root ─────────────────────────────────────────────────────────────────
 
 type AppScreen =
@@ -1677,6 +2048,8 @@ function useCurrentClock() {
 }
 
 export default function App() {
+  const [users, setUsers] = useState<StoredUser[]>(() => readStoredUsers());
+  const [currentUsername, setCurrentUsername] = useState<string | null>(() => readStoredSession());
   const [screen, setScreen] = useState<AppScreen>({ id: "loading" });
   const [searching, setSearching] = useState(false);
   const [searchTarget, setSearchTarget] = useState<SearchTarget>("general");
@@ -1688,6 +2061,85 @@ export default function App() {
   const [homeStopId, setHomeStopId] = useState("college-yonge");
   const initializedLocationRef = useRef(false);
   const canvasScale = useCanvasScale();
+  const currentUser = users.find(user => user.username === currentUsername) ?? null;
+
+  useEffect(() => {
+    if (currentUsername && !currentUser) {
+      setCurrentUsername(null);
+      writeStoredSession(null);
+    }
+  }, [currentUsername, currentUser]);
+
+  const persistUsers = (nextUsers: StoredUser[]) => {
+    setUsers(nextUsers);
+    writeStoredUsers(nextUsers);
+  };
+
+  const handleSignup = async (username: string, password: string) => {
+    const cleanedUsername = username.trim();
+    if (cleanedUsername.length < USERNAME_MIN_LENGTH || cleanedUsername.length > USERNAME_MAX_LENGTH) {
+      return `Username must be ${USERNAME_MIN_LENGTH}-${USERNAME_MAX_LENGTH} characters.`;
+    }
+    if (password.length < PASSWORD_MIN_LENGTH || password.length > PASSWORD_MAX_LENGTH) {
+      return `Password must be ${PASSWORD_MIN_LENGTH}-${PASSWORD_MAX_LENGTH} characters.`;
+    }
+    if (users.some(user => user.username.toLowerCase() === cleanedUsername.toLowerCase())) {
+      return "That username already exists.";
+    }
+
+    const passwordHash = await hashPassword(cleanedUsername, password);
+    const nextUsers = [...users, { username: cleanedUsername, passwordHash, searchHistory: [] }];
+    persistUsers(nextUsers);
+    setCurrentUsername(cleanedUsername);
+    writeStoredSession(cleanedUsername);
+    return null;
+  };
+
+  const handleLogin = async (username: string, password: string) => {
+    const existingUser = users.find(user => user.username.toLowerCase() === username.trim().toLowerCase());
+    if (!existingUser) return "No account found for that username.";
+
+    const passwordHash = await hashPassword(existingUser.username, password);
+    if (passwordHash !== existingUser.passwordHash) return "Password is incorrect.";
+
+    setCurrentUsername(existingUser.username);
+    writeStoredSession(existingUser.username);
+    return null;
+  };
+
+  const handleLogout = () => {
+    setCurrentUsername(null);
+    writeStoredSession(null);
+  };
+
+  const rememberSearch = (item: Omit<SearchHistoryItem, "savedAt">) => {
+    if (!currentUsername) return;
+
+    const nextItem: SearchHistoryItem = {
+      ...item,
+      title: item.title.replace(/^(bus stop|destination):\s*/i, ""),
+      savedAt: Date.now(),
+    };
+
+    setUsers(prevUsers => {
+      const nextUsers = prevUsers.map(user => {
+        if (user.username !== currentUsername) return user;
+
+        const nextHistory = [
+          nextItem,
+          ...user.searchHistory.filter(historyItem => `${historyItem.type}:${historyItem.id}` !== `${nextItem.type}:${nextItem.id}`),
+        ].slice(0, MAX_SEARCH_HISTORY);
+
+        return {
+          ...user,
+          searchHistory: nextHistory,
+        };
+      });
+
+      writeStoredUsers(nextUsers);
+      return nextUsers;
+    });
+  };
 
   useEffect(() => {
     if (!navigator.geolocation) {
@@ -1778,6 +2230,27 @@ export default function App() {
     setSearching(false);
     setSearchTarget("general");
     setQuery("");
+  };
+
+  const handleSelectHistory = (item: SearchHistoryItem) => {
+    rememberSearch(item);
+    setSearching(false);
+    setSearchTarget("general");
+    setQuery("");
+
+    if (item.type === "origin" && item.pos) {
+      setOriginOverride({ label: item.title, pos: item.pos });
+      setMapCenter(item.pos);
+      return;
+    }
+
+    if (item.type === "stop") {
+      setScreen({ id: "map", stopId: item.id, fromSearch: true });
+      if (item.pos) setMapCenter(item.pos);
+      return;
+    }
+
+    setScreen({ id: "destNav", destId: item.id });
   };
 
   const handleOpenReport = (route: number, dir: string) => {
@@ -1879,17 +2352,26 @@ export default function App() {
           zoom: canvasScale,
         }}
       >
+        <AccountControl
+          currentUser={currentUser}
+          onLogin={handleLogin}
+          onSignup={handleSignup}
+          onLogout={handleLogout}
+        />
         {searching ? (
           <SearchOverlay
             query={query}
             target={searchTarget}
             currentLocation={userPos ? { label: "Your location", pos: userPos } : null}
+            searchHistory={currentUser?.searchHistory ?? []}
             onQueryChange={setQuery}
             onClose={() => { setSearching(false); setSearchTarget("general"); setQuery(""); }}
             onSelectStop={handleSelectStop}
             onSelectDest={handleSelectDest}
             onSelectOrigin={handleSelectOrigin}
             onSelectCurrentLocation={handleSelectCurrentLocation}
+            onRememberSearch={rememberSearch}
+            onSelectHistory={handleSelectHistory}
           />
         ) : screen.id === "loading" ? (
           <div className="min-h-[844px] bg-white flex items-center justify-center">

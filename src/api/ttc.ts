@@ -923,10 +923,9 @@ function describeTrafficLevel(delayMin: number): string {
 
 function describeEventImpact(impact: EventImpact, targetTime?: Date): string {
   const when = targetTime ? `around ${formatTransitTime(targetTime)}` : "right now";
-  const source = impact.source === "ticketmaster" ? "Ticketmaster" : "major Toronto venue estimates";
 
   if (impact.events.length === 0) {
-    return `I do not see nearby sports games, concerts, festivals, or large entertainment events affecting TTC arrivals ${when}. Source: ${source}.`;
+    return `I do not see nearby sports games, concerts, festivals, or large entertainment events affecting TTC arrivals ${when}.`;
   }
 
   const eventText = impact.events
@@ -937,23 +936,22 @@ function describeEventImpact(impact: EventImpact, targetTime?: Date): string {
     ? `Large-event crowds may add about ${impact.eventDelayMin} min near the route.`
     : "Those events should not add TTC delay.";
 
-  return `${when}, ${delayText} Source: ${source}. Events: ${eventText}.`;
+  return `${when}, ${delayText} Events: ${eventText}.`;
 }
 
 function describeHolidayImpact(impact: HolidayImpact, targetTime?: Date): string {
   const when = targetTime ? `around ${formatTransitTime(targetTime)}` : "today";
-  const source = impact.source === "nager" ? "Nager.Date" : "local fallback";
   const holiday = impact.holidays[0];
 
   if (!holiday) {
-    return `I do not see an Ontario public holiday for ${when}. Source: ${source}.`;
+    return `I do not see an Ontario public holiday for ${when}.`;
   }
 
   const delayText = impact.holidayDelayMin > 0
     ? `It may add about ${impact.holidayDelayMin} min because TTC schedules and travel patterns can shift on holidays.`
     : "I do not expect extra TTC delay from it right now.";
 
-  return `${holiday.name} is observed ${when}. ${delayText} Source: ${source}.`;
+  return `${holiday.name} is observed ${when}. ${delayText}`;
 }
 
 function formatLegMode(mode: NavigationLeg["mode"]): string {
