@@ -241,39 +241,6 @@ const routePeriodPredicate = () =>
 
 const servicePeriodParam = () => getServicePeriod();
 
-const getHeadsignCardinal = (headsign: string) =>
-  headsign.match(/^(North|South|East|West)\b/i)?.[1]?.toLowerCase() ?? headsign.toLowerCase();
-
-const isShortTurnHeadsign = (headsign: string) => /\bshort\s*turn\b/i.test(headsign);
-
-const getHeadsignScore = (headsign: string) => {
-  let score = 0;
-  if (isShortTurnHeadsign(headsign)) score += 10;
-  if (!/\btowards?\b/i.test(headsign)) score += 4;
-  if (/^inbound$/i.test(headsign.trim())) score += 20;
-  if (/^outbound$/i.test(headsign.trim())) score += 20;
-  return score;
-};
-
-const pickRepresentativeHeadsigns = (headsigns: string[]) => {
-  const bestByCardinal = new Map<string, string>();
-
-  headsigns
-    .map((headsign) => cleanHeadsign(headsign))
-    .filter(Boolean)
-    .forEach((headsign) => {
-      const key = getHeadsignCardinal(headsign);
-      const current = bestByCardinal.get(key);
-      if (!current || getHeadsignScore(headsign) < getHeadsignScore(current)) {
-        bestByCardinal.set(key, headsign);
-      }
-    });
-
-  return [...bestByCardinal.values()]
-    .sort((a, b) => getHeadsignScore(a) - getHeadsignScore(b))
-    .slice(0, 2);
-};
-
 const toNumberRoutes = (routes: Iterable<string | number>) =>
   [...routes]
     .map((route) => Number(route))
