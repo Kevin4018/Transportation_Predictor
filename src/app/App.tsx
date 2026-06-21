@@ -401,10 +401,20 @@ function describeHolidayDelay(impact: HolidayImpact) {
 }
 
 function estimateConfidenceFromFactors(factors: BusReportData["factors"]) {
-  const variableDelay = Object.values(factors)
-    .reduce((total, factor) => total + Math.abs(factor.value), 0);
+  const variableDelay = Object.entries(factors)
+    .reduce((total, [key, factor]) => key === "schedule" ? total : total + Math.abs(factor.value), 0);
 
   return Math.max(62, Math.min(94, 94 - variableDelay * 4));
+}
+
+function sumFactorValues(factors: Record<string, { value: number }>) {
+  return Object.values(factors)
+    .reduce((total, factor) => total + factor.value, 0);
+}
+
+function sumPredictionOffsets(offsets: Prediction["offsets"]) {
+  return Object.values(offsets)
+    .reduce((total, value) => total + (value ?? 0), 0);
 }
 
 // ─── Shared loading skeleton ──────────────────────────────────────────────────
@@ -745,19 +755,24 @@ function MapScreen({ stopId, showControls, mapCenter, userPos, locationStatus, o
   const eventDelay = eventImpact?.eventDelayMin ?? prediction?.offsets.events ?? 0;
   const holidayDelay = holidayImpact?.holidayDelayMin ?? prediction?.offsets.holidays ?? 0;
   const displayedPrediction = prediction && weatherDelay !== undefined
-    ? {
-      ...prediction,
-      etaMin: prediction.etaMin + eventDelay + holidayDelay,
-      offsets: {
+    ? (() => {
+      const offsets: Prediction["offsets"] = {
         ...prediction.offsets,
+        schedule: prediction.etaMin,
         weather: weatherDelay,
         traffic: trafficDelay ?? prediction.offsets.traffic,
         accidents: accidentDelay ?? prediction.offsets.accidents,
         construction: constructionDelay ?? prediction.offsets.construction,
         events: eventDelay,
         holidays: holidayDelay,
-      },
-    }
+      };
+
+      return {
+        ...prediction,
+        etaMin: Math.max(0, sumPredictionOffsets(offsets)),
+        offsets,
+      };
+    })()
     : prediction;
 
   return (
@@ -878,8 +893,9 @@ function MapScreen({ stopId, showControls, mapCenter, userPos, locationStatus, o
                   <OffsetItem icon={<ConstructionIcon />}  value={displayedPrediction.offsets.construction} label="construction" />
                   <OffsetItem icon={<StarIcon />}           value={displayedPrediction.offsets.events ?? 0}  label="events" />
                 </div>
-                <div className="flex justify-start mb-3">
+                <div className="flex justify-start gap-[24px] mb-3">
                   <OffsetItem icon={<StarIcon />}           value={displayedPrediction.offsets.holidays ?? 0} label="holiday" />
+                  <OffsetItem icon={<StarIcon />}           value={displayedPrediction.offsets.other}         label="other" />
                 </div>
                 <button
                   onClick={() => selectedRoute !== null && dir !== null && onOpenReport(selectedRoute, dir)}
@@ -927,6 +943,10 @@ function BusReport({ route, dir, stopId, mapCenter, onClose }: BusReportProps) {
           ...report,
           factors: {
             ...report.factors,
+            schedule: {
+              value: report.etaMin,
+              description: `GTFS schedule shows the next vehicle in ${report.etaMin} min for ${dir}.`,
+            },
           },
         };
 
@@ -961,7 +981,6 @@ function BusReport({ route, dir, stopId, mapCenter, onClose }: BusReportProps) {
         }
 
         if (eventImpact) {
-          nextReport.etaMin += eventImpact.eventDelayMin;
           nextReport.factors.events = {
             value: eventImpact.eventDelayMin,
             description: describeEventDelay(eventImpact),
@@ -969,13 +988,13 @@ function BusReport({ route, dir, stopId, mapCenter, onClose }: BusReportProps) {
         }
 
         if (holidayImpact) {
-          nextReport.etaMin += holidayImpact.holidayDelayMin;
           nextReport.factors.holidays = {
             value: holidayImpact.holidayDelayMin,
             description: describeHolidayDelay(holidayImpact),
           };
         }
 
+        nextReport.etaMin = Math.max(0, sumFactorValues(nextReport.factors));
         nextReport.confidence = estimateConfidenceFromFactors(nextReport.factors);
         setData(nextReport);
         setLoading(false);
