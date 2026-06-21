@@ -55,6 +55,8 @@ export interface Prediction {
     passengerLoad?: number;
     accidents: number;
     construction: number;
+    events?: number;
+    holidays?: number;
     other: number;
   };
   summary?: string;
@@ -78,6 +80,8 @@ export interface BusReport {
     passengerLoad?: { value: number; description: string };
     accidents: { value: number; description: string };
     construction: { value: number; description: string };
+    events?: { value: number; description: string };
+    holidays?: { value: number; description: string };
     other?: { value: number; description: string };
   };
 }

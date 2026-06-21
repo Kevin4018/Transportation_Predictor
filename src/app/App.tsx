@@ -317,6 +317,14 @@ import {
   getConstructionImpact,
   type ConstructionImpact,
 } from "@/api/construction";
+import {
+  getEventImpact,
+  type EventImpact,
+} from "@/api/events";
+import {
+  getHolidayImpact,
+  type HolidayImpact,
+} from "@/api/holidays";
 
 function estimateWeatherDelay(weather: CurrentWeather): number {
   const condition = weather.condition.toLowerCase();
@@ -368,6 +376,30 @@ function describeConstructionDelay(impact: ConstructionImpact) {
   return `${event.title}. ${event.description} (${event.distanceKm.toFixed(1)} km away).`;
 }
 
+function describeEventDelay(impact: EventImpact) {
+  const event = impact.events[0];
+  const source = impact.source === "ticketmaster" ? "Ticketmaster event data" : "Toronto venue pressure estimate";
+
+  if (!event) {
+    return impact.source === "ticketmaster"
+      ? "No nearby sports games, concerts, or major entertainment events are showing in the event feed for this trip window."
+      : "No major Toronto venue pressure is expected for this trip window.";
+  }
+
+  return `${source}: ${event.description} (${event.distanceKm.toFixed(1)} km away).`;
+}
+
+function describeHolidayDelay(impact: HolidayImpact) {
+  const holiday = impact.holidays[0];
+  const source = impact.source === "nager" ? "Nager.Date holiday data" : "local holiday fallback";
+
+  if (!holiday) {
+    return "No Ontario public holiday is detected for this trip date.";
+  }
+
+  return `${source}: ${impact.description}`;
+}
+
 function estimateConfidenceFromFactors(factors: BusReportData["factors"]) {
   const variableDelay = Object.entries(factors)
     .reduce((total, [key, factor]) => key === "schedule" ? total : total + Math.abs(factor.value), 0);
@@ -382,7 +414,7 @@ function sumFactorValues(factors: Record<string, { value: number }>) {
 
 function sumPredictionOffsets(offsets: Prediction["offsets"]) {
   return Object.values(offsets)
-    .reduce((total, value) => total + value, 0);
+    .reduce((total, value) => total + (value ?? 0), 0);
 }
 
 // ─── Shared loading skeleton ──────────────────────────────────────────────────
@@ -640,6 +672,8 @@ function MapScreen({ stopId, showControls, mapCenter, userPos, locationStatus, o
   const [weather, setWeather] = useState<CurrentWeather | null>(null);
   const [trafficImpact, setTrafficImpact] = useState<TrafficImpact | null>(null);
   const [constructionImpact, setConstructionImpact] = useState<ConstructionImpact | null>(null);
+  const [eventImpact, setEventImpact] = useState<EventImpact | null>(null);
+  const [holidayImpact, setHolidayImpact] = useState<HolidayImpact | null>(null);
 
   // Bootstrap: load stop metadata, pick defaults, then fetch first prediction
   useEffect(() => {
@@ -699,10 +733,14 @@ function MapScreen({ stopId, showControls, mapCenter, userPos, locationStatus, o
     Promise.all([
       getTrafficImpact(mapCenter[0], mapCenter[1], selectedRoute).catch(() => null),
       getConstructionImpact(mapCenter[0], mapCenter[1]).catch(() => null),
-    ]).then(([nextTrafficImpact, nextConstructionImpact]) => {
+      getEventImpact(mapCenter[0], mapCenter[1], selectedRoute).catch(() => null),
+      getHolidayImpact().catch(() => null),
+    ]).then(([nextTrafficImpact, nextConstructionImpact, nextEventImpact, nextHolidayImpact]) => {
       if (cancelled) return;
       setTrafficImpact(nextTrafficImpact);
       setConstructionImpact(nextConstructionImpact);
+      setEventImpact(nextEventImpact);
+      setHolidayImpact(nextHolidayImpact);
     });
 
     return () => { cancelled = true; };
@@ -714,6 +752,8 @@ function MapScreen({ stopId, showControls, mapCenter, userPos, locationStatus, o
   const trafficDelay = trafficImpact?.trafficDelayMin ?? prediction?.offsets.traffic;
   const accidentDelay = trafficImpact?.accidentDelayMin ?? prediction?.offsets.accidents;
   const constructionDelay = constructionImpact?.constructionDelayMin ?? trafficImpact?.constructionDelayMin ?? prediction?.offsets.construction;
+  const eventDelay = eventImpact?.eventDelayMin ?? prediction?.offsets.events ?? 0;
+  const holidayDelay = holidayImpact?.holidayDelayMin ?? prediction?.offsets.holidays ?? 0;
   const displayedPrediction = prediction && weatherDelay !== undefined
     ? (() => {
       const offsets: Prediction["offsets"] = {
@@ -723,6 +763,8 @@ function MapScreen({ stopId, showControls, mapCenter, userPos, locationStatus, o
         traffic: trafficDelay ?? prediction.offsets.traffic,
         accidents: accidentDelay ?? prediction.offsets.accidents,
         construction: constructionDelay ?? prediction.offsets.construction,
+        events: eventDelay,
+        holidays: holidayDelay,
       };
 
       return {
@@ -849,7 +891,11 @@ function MapScreen({ stopId, showControls, mapCenter, userPos, locationStatus, o
                 <div className="flex justify-between mb-3">
                   <OffsetItem icon={<WalkIcon />}          value={displayedPrediction.offsets.accidents}    label="accidents" />
                   <OffsetItem icon={<ConstructionIcon />}  value={displayedPrediction.offsets.construction} label="construction" />
-                  <OffsetItem icon={<StarIcon />}           value={displayedPrediction.offsets.other}        label="other" />
+                  <OffsetItem icon={<StarIcon />}           value={displayedPrediction.offsets.events ?? 0}  label="events" />
+                </div>
+                <div className="flex justify-start gap-[24px] mb-3">
+                  <OffsetItem icon={<StarIcon />}           value={displayedPrediction.offsets.holidays ?? 0} label="holiday" />
+                  <OffsetItem icon={<StarIcon />}           value={displayedPrediction.offsets.other}         label="other" />
                 </div>
                 <button
                   onClick={() => selectedRoute !== null && dir !== null && onOpenReport(selectedRoute, dir)}
@@ -887,8 +933,10 @@ function BusReport({ route, dir, stopId, mapCenter, onClose }: BusReportProps) {
       getCurrentWeather(mapCenter[0], mapCenter[1]).catch(() => null),
       getTrafficImpact(mapCenter[0], mapCenter[1], route).catch(() => null),
       getConstructionImpact(mapCenter[0], mapCenter[1]).catch(() => null),
+      getEventImpact(mapCenter[0], mapCenter[1], route).catch(() => null),
+      getHolidayImpact().catch(() => null),
     ])
-      .then(([report, currentWeather, trafficImpact, constructionImpact]) => {
+      .then(([report, currentWeather, trafficImpact, constructionImpact, eventImpact, holidayImpact]) => {
         if (cancelled) return;
 
         const nextReport: BusReportData = {
@@ -932,6 +980,20 @@ function BusReport({ route, dir, stopId, mapCenter, onClose }: BusReportProps) {
           };
         }
 
+        if (eventImpact) {
+          nextReport.factors.events = {
+            value: eventImpact.eventDelayMin,
+            description: describeEventDelay(eventImpact),
+          };
+        }
+
+        if (holidayImpact) {
+          nextReport.factors.holidays = {
+            value: holidayImpact.holidayDelayMin,
+            description: describeHolidayDelay(holidayImpact),
+          };
+        }
+
         nextReport.etaMin = Math.max(0, sumFactorValues(nextReport.factors));
         nextReport.confidence = estimateConfidenceFromFactors(nextReport.factors);
         setData(nextReport);
@@ -946,7 +1008,7 @@ function BusReport({ route, dir, stopId, mapCenter, onClose }: BusReportProps) {
 
   const iconMap: Record<string, React.ReactNode> = {
     schedule: <BusIcon />, weather: <CloudIcon />, traffic: <TrafficIcon />,
-    accidents: <WalkIcon />, construction: <ConstructionIcon />, other: <StarIcon />,
+    accidents: <WalkIcon />, construction: <ConstructionIcon />, events: <StarIcon />, holidays: <StarIcon />, other: <StarIcon />,
   };
 
   return (
