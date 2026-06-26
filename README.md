@@ -5,8 +5,8 @@ This project is a TTC transit prototype with:
 - Vite/React frontend
 - Express API server
 - local TTC GTFS SQLite database for stops and scheduled arrivals
-- OpenTripPlanner 2.8 for real walking, driving, biking, and TTC routing
-- Google Maps Directions API support for real GTA/GTHA cross-agency routing when configured
+- OpenTripPlanner 2.8 for real walking, driving, biking, TTC routing, and optional GTA/GTHA cross-agency routing
+- configurable official GTFS feeds for GO Transit, Oakville Transit, MiWay, YRT/Viva, Brampton Transit, Durham Region Transit, Burlington Transit, HSR, Milton Transit, and TTC
 - live place search through a geocoder for arbitrary destinations
 
 ## Current Features
@@ -59,8 +59,8 @@ data/
     Complete GTFS.zip
   otp/
     otp-shaded-2.8.1.jar
-    ttc.gtfs.zip
     toronto.osm.pbf
+    *.gtfs.zip
   construction/
     Road-reconstruction-program.geojson
 ```
@@ -72,6 +72,20 @@ npm run setup:data
 ```
 
 Large database/data files are local runtime assets and may not be committed to Git.
+
+For GTA/GTHA routing, copy the feed template and fill it with official GTFS zip URLs:
+
+```bash
+cp config/gtha-gtfs-feeds.example.json config/gtha-gtfs-feeds.json
+```
+
+Enable only feeds with real official URLs, then download them:
+
+```bash
+npm run download:gtha-gtfs
+```
+
+The script writes GTFS zips into `data/otp`, where OTP can build them into one graph together with the OSM file. It does not create mock transit data.
 
 ## Environment
 
@@ -86,7 +100,9 @@ TTC_GTFS_RT_TRIP_UPDATES_URL=https://gtfsrt.ttc.ca/trips/update?format=text
 OTP_BASE_URL=http://localhost:8080
 OTP_PLAN_DATETIME=match-weekday
 OTP_GTFS_SERVICE_START_DATE=2026-06-21
-GOOGLE_MAPS_API_KEY=optional_google_maps_directions_api_key_for_gta_routing
+ROUTING_PROVIDER=otp
+GTHA_GTFS_FEEDS_FILE=./config/gtha-gtfs-feeds.json
+GTHA_GTFS_OUTPUT_DIR=./data/otp
 TICKETMASTER_API_KEY=optional_ticketmaster_discovery_api_key
 TOMTOM_API_KEY=optional_tomtom_traffic_api_key
 ```
@@ -97,7 +113,11 @@ TOMTOM_API_KEY=optional_tomtom_traffic_api_key
 
 `TTC_GTFS_RT_TRIP_UPDATES_URL` enables real TTC GTFS-Realtime trip updates. Arrival predictions use this feed first when it contains a matching route and stop, then fall back to static GTFS schedules when live data is unavailable.
 
-`GOOGLE_MAPS_API_KEY` enables real cross-GTA/GTHA trip planning through Google Maps Directions API, including transit trips that combine GO Transit, TTC, Oakville Transit, MiWay, YRT/Viva, Brampton Transit, Durham Region Transit, HSR, walking, driving, and biking where Google has provider coverage. Enable Directions API for the key in Google Cloud and attach billing. Without this key, the app can only use your local OTP graph; for GTHA routing without Google, build OTP with complete GTFS feeds for the relevant agencies.
+`ROUTING_PROVIDER=otp` keeps routing on self-hosted OpenTripPlanner. This is the recommended no-Google, no-paid-routing setup.
+
+`GTHA_GTFS_FEEDS_FILE` points to your local list of official GTFS feed URLs. Use it with `npm run download:gtha-gtfs` to download real agency feeds into the OTP graph directory. The app will route across agencies only after OTP is rebuilt with those feeds.
+
+`GOOGLE_MAPS_API_KEY` is optional and only used if you explicitly set `ROUTING_PROVIDER=google` or `ROUTING_PROVIDER=auto`. Leave it blank for the self-hosted OTP setup.
 
 `TICKETMASTER_API_KEY` enables live Toronto sports, concert, festival, and entertainment event lookups through the Ticketmaster Discovery API. If it is not set, the app falls back to local major-venue pressure estimates for Toronto.
 
@@ -112,13 +132,13 @@ Restart `npm run server` after changing `.env`.
 Open a terminal from the project root and run:
 
 ```bash
-java -Xmx4G -jar ./data/otp/otp-shaded-2.8.1.jar --build --serve ./data/otp
+npm run otp:build:gtha
 ```
 
 On Windows PowerShell:
 
 ```powershell
-java -Xmx4G -jar .\data\otp\otp-shaded-2.8.1.jar --build --serve .\data\otp
+npm run otp:build:gtha
 ```
 
 Keep this terminal running. OTP is ready when you see a log line like:
@@ -142,7 +162,7 @@ Use three terminals:
 1. OpenTripPlanner:
 
 ```bash
-java -Xmx4G -jar ./data/otp/otp-shaded-2.8.1.jar --build --serve ./data/otp
+npm run otp:build:gtha
 ```
 
 2. Express API:
@@ -173,6 +193,7 @@ http://localhost:5173
 
 - Search or navigation changes do not show up: restart `npm run server`.
 - OTP says no transit route: confirm the Java OTP terminal is still running on port `8080`.
+- Oakville/Mississauga/York/Durham/Hamilton routes are missing: confirm their official GTFS zips are enabled in `config/gtha-gtfs-feeds.json`, rerun `npm run download:gtha-gtfs`, and rebuild OTP.
 - Transit only works on one date: keep `OTP_PLAN_DATETIME=match-weekday`.
 - Browser location does not show: allow location permission for the local site in the browser.
 - Arbitrary destination search needs network access because it uses an online geocoder.

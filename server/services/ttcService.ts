@@ -1968,6 +1968,11 @@ type GoogleDirectionsResponse = {
 const getGoogleMapsApiKey = () =>
   process.env.GOOGLE_MAPS_API_KEY ?? process.env.GOOGLE_DIRECTIONS_API_KEY;
 
+const getRoutingProvider = () => {
+  const provider = (process.env.ROUTING_PROVIDER ?? "otp").toLowerCase();
+  return provider === "google" || provider === "auto" ? provider : "otp";
+};
+
 const stripHtml = (value?: string) =>
   (value ?? "")
     .replace(/<[^>]+>/g, " ")
@@ -2396,6 +2401,17 @@ export const getNavigationRoute = (
 
   if (originCoordinates) {
     const hasGoogleKey = Boolean(getGoogleMapsApiKey());
+    const provider = getRoutingProvider();
+    if (provider === "google") {
+      return getGoogleNavigationRoute(dest, originCoordinates, mode, departureTime)
+        .then((route) => route ?? getRealRoutingConfigurationRequiredRoute(dest, originCoordinates, mode));
+    }
+
+    if (provider === "otp") {
+      return getOtpNavigationRoute(dest, originCoordinates, mode, departureTime)
+        .then((route) => route ?? getRealRoutingConfigurationRequiredRoute(dest, originCoordinates, mode));
+    }
+
     return getGoogleNavigationRoute(dest, originCoordinates, mode, departureTime)
       .then(async (googleRoute) => {
         if (googleRoute?.available !== false) {
