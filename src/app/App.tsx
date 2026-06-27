@@ -1395,8 +1395,18 @@ function DestNavScreen({ destId, mapCenter, originPos, originLabel, userPos, loc
   const [loading, setLoading] = useState(true);
   const [mode, setMode] = useState<NavigationMode>("bus");
   const [departureTime, setDepartureTime] = useState(() => getTorontoTimeInputValue());
+  const [departNow, setDepartNow] = useState(true);
   const route = routesByMode[mode] ?? routesByMode.bus ?? null;
   const routeFailed = !loading && !route;
+
+  useEffect(() => {
+    if (!departNow) return;
+
+    const updateNow = () => setDepartureTime(getTorontoTimeInputValue());
+    updateNow();
+    const interval = window.setInterval(updateNow, 30_000);
+    return () => window.clearInterval(interval);
+  }, [departNow]);
 
   useEffect(() => {
     if (!originPos) return;
@@ -1473,7 +1483,7 @@ function DestNavScreen({ destId, mapCenter, originPos, originLabel, userPos, loc
   };
 
   return (
-    <div className="bg-white flex flex-col min-h-full">
+    <div className="bg-white flex flex-col h-full min-h-0 overflow-hidden">
       <div className="h-[52px] shrink-0" />
       {/* Two search bars */}
       <div className="px-[19px] shrink-0 flex flex-col gap-2">
@@ -1502,14 +1512,23 @@ function DestNavScreen({ destId, mapCenter, originPos, originLabel, userPos, loc
             <input
               type="time"
               value={departureTime}
-              onChange={event => setDepartureTime(event.target.value || getTorontoTimeInputValue())}
+              onChange={event => {
+                const value = event.target.value || getTorontoTimeInputValue();
+                setDepartNow(false);
+                setDepartureTime(value);
+              }}
               className="min-w-0 flex-1 bg-transparent text-[16px] text-[#1a1a1a] tracking-[-0.08px] outline-none font-['SF_Compact',system-ui,sans-serif]"
             />
           </label>
           <button
             type="button"
-            onClick={() => setDepartureTime(getTorontoTimeInputValue())}
-            className="h-[38px] px-4 rounded-full bg-[#007AFF] text-white font-['SF_Compact',system-ui,sans-serif] text-[14px] tracking-[-0.08px]"
+            onClick={() => {
+              setDepartNow(true);
+              setDepartureTime(getTorontoTimeInputValue());
+            }}
+            className={`h-[38px] px-4 rounded-full font-['SF_Compact',system-ui,sans-serif] text-[14px] tracking-[-0.08px] ${
+              departNow ? "bg-[#007AFF] text-white" : "bg-[rgba(120,120,128,0.16)] text-[#007AFF]"
+            }`}
           >
             Now
           </button>
@@ -1534,10 +1553,10 @@ function DestNavScreen({ destId, mapCenter, originPos, originLabel, userPos, loc
       </div>
 
       {/* Bottom panel */}
-      <div className="px-[19px] mt-[6px] pb-4 flex-1">
-        <div className="bg-[#d9d9d9] rounded-[20px] shadow-[0px_4px_4px_0px_rgba(0,0,0,0.25)] w-full overflow-hidden">
+      <div className="px-[19px] mt-[6px] pb-4 flex-1 min-h-0">
+        <div className="bg-[#d9d9d9] rounded-[20px] shadow-[0px_4px_4px_0px_rgba(0,0,0,0.25)] w-full h-full min-h-0 overflow-hidden flex flex-col">
           {/* Transit mode tabs */}
-          <div className="flex gap-[5px] px-[11px] pt-[11px]">
+          <div className="flex gap-[5px] px-[11px] pt-[11px] shrink-0">
             {(["bus", "car", "walk", "bike"] as NavigationMode[]).map(m => (
               <button key={m} onClick={() => setMode(m)}
                 className={`flex-1 h-[50px] rounded-tl-[10px] rounded-tr-[10px] flex flex-col items-center justify-center gap-0.5 cursor-pointer transition-colors ${m === mode ? "bg-white" : "bg-[#aaa]"}`}>
@@ -1548,20 +1567,20 @@ function DestNavScreen({ destId, mapCenter, originPos, originLabel, userPos, loc
           </div>
 
           {/* Route detail */}
-          <div className="mx-[11px] bg-white rounded-bl-[20px] rounded-br-[20px] px-4 py-3">
+          <div className="mx-[11px] mb-[11px] bg-white rounded-bl-[20px] rounded-br-[20px] px-4 py-3 flex-1 min-h-0 overflow-hidden flex flex-col">
             {loading ? (
-              <div className="flex flex-col gap-3">
+              <div className="flex flex-col gap-3 shrink-0">
                 {[1,2,3,4].map(i => <Skeleton key={i} className="h-10 w-full" />)}
               </div>
             ) : routeFailed ? (
-              <div className="py-8">
+              <div className="py-8 shrink-0">
                 <p className="font-['SF_Compact',system-ui,sans-serif] text-[15px] text-[#4f4f4f] text-center">
                   Navigation unavailable.
                 </p>
               </div>
             ) : (
               <>
-                <div className="flex items-center justify-between py-2 border-b border-[#b8b8b8]">
+                <div className="flex items-center justify-between py-2 border-b border-[#b8b8b8] shrink-0">
                   <div className="flex items-center gap-2">
                     <div className="size-[20px] shrink-0"><PinIcon fill="#007AFF" /></div>
                     <span className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-black">{originLabel}</span>
@@ -1569,13 +1588,13 @@ function DestNavScreen({ destId, mapCenter, originPos, originLabel, userPos, loc
                   <span className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-black">{route.departureTime || departureTime}</span>
                 </div>
                 {route.available === false ? (
-                  <div className="py-8 border-b border-[#b8b8b8]">
+                  <div className="py-8 border-b border-[#b8b8b8] shrink-0">
                     <p className="font-['SF_Compact',system-ui,sans-serif] text-[15px] text-[#4f4f4f] text-center">
                       {route.message ?? "Cannot find route."}
                     </p>
                   </div>
                 ) : (
-                  <div className="border-b border-[#b8b8b8]">
+                  <div className="border-b border-[#b8b8b8] flex-1 min-h-0 overflow-y-auto overscroll-contain pr-1">
                     {(route.legs ?? []).map((leg, index) => (
                       <div key={`${leg.mode}-${index}`} className="flex items-start gap-3 py-2">
                         <div className="size-[20px] shrink-0 mt-0.5">{renderLegIcon(leg.mode)}</div>
@@ -1599,7 +1618,7 @@ function DestNavScreen({ destId, mapCenter, originPos, originLabel, userPos, loc
                     ))}
                   </div>
                 )}
-                <div className="flex items-center justify-between py-2">
+                <div className="flex items-center justify-between py-2 shrink-0">
                   <div className="flex items-center gap-2">
                     <div className="size-[20px] shrink-0"><PinIcon /></div>
                     <span className="font-['SF_Compact',system-ui,sans-serif] text-[13px] text-black">{route.destName}</span>
@@ -1611,7 +1630,7 @@ function DestNavScreen({ destId, mapCenter, originPos, originLabel, userPos, loc
             <button
               onClick={() => onStartNavigation(mode, departureTime)}
               disabled={route?.available === false}
-              className="w-full bg-[#9d9d9d] disabled:bg-[#c9c9c9] rounded-[10px] h-[39px] flex items-center justify-center mt-2 cursor-pointer disabled:cursor-default"
+              className="w-full bg-[#9d9d9d] disabled:bg-[#c9c9c9] rounded-[10px] h-[39px] flex items-center justify-center mt-2 cursor-pointer disabled:cursor-default shrink-0"
             >
               <span className="font-['SF_Compact',system-ui,sans-serif] text-[16px] text-white tracking-[-0.08px]">Start Navigation</span>
             </button>
@@ -2834,11 +2853,11 @@ export default function App() {
             className="relative shrink-0 rounded-[0px] md:rounded-[24px] md:shadow-[0px_18px_60px_rgba(0,0,0,0.18)] lg:rounded-[18px] lg:shadow-[0px_12px_36px_rgba(0,0,0,0.12)]"
             style={{
               width: DESIGN_WIDTH * canvasScale,
-              minHeight: DESIGN_HEIGHT * canvasScale,
+              height: DESIGN_HEIGHT * canvasScale,
             }}
           >
             <div
-              className="w-[390px] min-h-[844px] bg-white relative overflow-x-hidden md:rounded-[24px] lg:rounded-[18px]"
+              className="w-[390px] h-[844px] bg-white relative overflow-hidden md:rounded-[24px] lg:rounded-[18px]"
               style={{
                 zoom: canvasScale,
               }}
