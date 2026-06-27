@@ -24,6 +24,8 @@ export interface LocalInfoResult {
   website?: string;
   mapsUrl?: string;
   priceLevel?: string;
+  recommendationScore?: number;
+  recommendationReasons?: string[];
   priceInfo?: {
     type: "ticket" | "fuel" | "service" | "general";
     value?: string;

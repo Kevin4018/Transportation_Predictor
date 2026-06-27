@@ -1,3 +1,5 @@
+import { rankCandidates, type RecommendationKind } from "../../src/shared/recommendationRanking";
+
 type LocalInfoIntent =
   | "nearby_places"
   | "ticket_info"
@@ -30,6 +32,8 @@ export interface LocalInfoResult {
   website?: string;
   mapsUrl?: string;
   priceLevel?: string;
+  recommendationScore?: number;
+  recommendationReasons?: string[];
   priceInfo?: {
     type: "ticket" | "fuel" | "service" | "general";
     value?: string;
@@ -169,6 +173,13 @@ function cleanSearchQuery(query: string) {
 function wantsDistanceRanking(query: string) {
   const text = query.toLowerCase();
   return /\b(?:near|nearby|nearest|closest|distance|how far|drive time|driving time)\b|(?:附近|最近|距离|多远|开车多久)/.test(text);
+}
+
+function localInfoRecommendationKind(intent: LocalInfoIntent): RecommendationKind {
+  if (intent === "ticket_info") return "places";
+  if (intent === "distance_route") return "plan";
+  if (intent === "nearby_places") return "places";
+  return "shopping";
 }
 
 function haversineKm(from: { lat: number; lng: number }, to: { lat: number; lng: number }) {
@@ -379,20 +390,29 @@ export async function searchLocalInfo(query: LocalInfoQuery): Promise<LocalInfoR
     };
   }));
 
+  const rankedResults = rankCandidates(results, {
+    input: query.query,
+    kind: localInfoRecommendationKind(intent),
+    language: query.language ?? "en",
+  });
+
   const shouldSortByDistance = wantsDistanceRanking(query.query) ||
     intent === "distance_route" ||
     intent === "gas_price" ||
     intent === "retail" ||
     intent === "local_service" ||
     intent === "nearby_places";
-  const sortedResults = results.sort((a, b) => {
+  const sortedResults = rankedResults.sort((a, b) => {
     if (shouldSortByDistance) {
-      return (a.distanceKm ?? 999) - (b.distanceKm ?? 999);
+      return (b.recommendationScore ?? 0) - (a.recommendationScore ?? 0) ||
+        (a.distanceKm ?? 999) - (b.distanceKm ?? 999);
     }
     if (intent === "price_compare") {
-      return (b.rating ?? 0) - (a.rating ?? 0);
+      return (b.recommendationScore ?? 0) - (a.recommendationScore ?? 0) ||
+        (b.rating ?? 0) - (a.rating ?? 0);
     }
-    return (b.rating ?? 0) - (a.rating ?? 0);
+    return (b.recommendationScore ?? 0) - (a.recommendationScore ?? 0) ||
+      (b.rating ?? 0) - (a.rating ?? 0);
   });
 
   return {
